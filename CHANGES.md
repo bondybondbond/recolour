@@ -14,3 +14,8 @@
 - Removed deprecated `request` / `request-promise` dev deps
 - Removed `standard` linter (add your own if needed)
 - Node engine: `>= 6` → `>= 16`
+
+## Security
+- Cleared 10 of 14 known CVEs from upstream (3 critical, 1 high, 6 moderate removed)
+- Pinned `serialize-javascript` to `7.0.6` via `overrides` (fixes high CVE in mocha's dev dep chain)
+- 4 moderate CVEs remain in `file-type` via jimp 0.22.x transitive chain — unfixable without jimp 1.x API migration; tracked separately

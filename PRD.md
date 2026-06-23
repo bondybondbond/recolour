@@ -7,11 +7,11 @@
 ## Problem Statement
 
 Most free colour-replacement tools either:
-1. Use simple RGB matching (inaccurate — misses anti-aliased edges, JPEG noise, gradients)
+1. Use simple RGB matching (inaccurate — misses anti-aliased edges, JPEG noise, gradients, shades)
 2. Upload your image to a third-party server (privacy risk — opaque ToS, potential training data use)
 3. Require heavy software (GIMP/Photoshop) with steep learning curves
 
-No free, simple, local-first tool exists with perceptual (Delta-E) colour matching.
+No free, simple, local-first tool exists with perceptual (Delta-E) colour matching **or** neighbour-aware replacement.
 
 ---
 
@@ -30,57 +30,88 @@ Power users who need precise, tolerance-based colour removal (watermarks, logos,
 
 ---
 
+## Competitor UX Review (hands-on)
+
+### vayce.app
+- **Good:** Extensive customisation (tolerance, softness, strength, transparency), good colour picker
+- **Bad:** Too many settings — overwhelming for most users; before/after requires too many clicks
+- **Missing:** No perceptual matching; tolerance failed to eliminate shades/greys in real-world test; no neighbour-aware replacement
+- **Verdict:** Over-engineered UI, under-powered engine
+
+### imageonline.io
+- **Good:** Most straightforward; **live preview on tolerance drag is excellent UX** — instant feedback loop we should replicate
+- **Bad:** No true before/after toggle (setting tolerance to 0 is a workaround, not a feature)
+- **Missing:** Same engine limitations as vayce — RGB-only, no perceptual matching, no inpainting
+- **Verdict:** Best UX of the free tools, but weakest engine
+
+### Key finding from testing
+Neither tool could correctly eliminate shades of grey/gradient variants of a target colour. This is precisely the Delta-E advantage — and it's unaddressed in any free tool.
+
+---
+
 ## Core Differentiators
 
 | Differentiator | Why it matters |
 |---|---|
-| **Delta-E perceptual matching** | Handles anti-aliased edges, JPEG noise, gradients — RGB tools can't |
+| **Delta-E perceptual matching** | Correctly handles shades, gradients, anti-aliased edges, JPEG noise — RGB tools demonstrably fail this |
+| **Neighbour-aware replacement** | Replace matched pixels with surrounding colours — no other free tool has this |
 | **100% local processing** | Image never leaves your machine — zero upload, zero data risk |
 | **Free, open source** | No freemium wall, no account required |
 | **Region selection** | Restrict replacement to a drawn area — prevents accidental over-replacement |
-| **Inpainting** | Fill removed pixels with surrounding content — not just a flat replacement colour |
+| **Live tolerance preview** | Instant feedback (stolen from imageonline UX) — must-have |
 
 ---
 
 ## Competitive Landscape
 
-| Tool | Type | Free? | Delta-E? | Region? | Inpaint? | Processing | Data risk |
+| Tool | Free? | Delta-E? | Neighbour replace? | Region? | Inpaint? | Processing | Data risk |
 |---|---|---|---|---|---|---|---|
-| remove.bg | Web app | Freemium | No (AI) | No | AI | ☁️ Their servers | High — images stored, used for AI training |
-| Canva Magic Erase | Web app | Freemium | No (AI) | No | AI | ☁️ Their servers | High — ToS grants broad usage rights |
-| vayce.app | Web app | Free | No | No | No | ☁️ Unknown | Unknown — no clear privacy policy |
-| imageonline.io | Web app | Free | No | No | No | ☁️ Their servers | Medium — claims deletion after processing |
-| GIMP | Desktop | Free | No | Yes | Yes | 🖥️ Local | Zero |
-| Photoshop | Desktop | Paid | No | Yes | Yes | 🖥️ Local (AI = cloud) | Low offline, High for AI features |
-| **Recolour (this project)** | Local web | **Free** | ✅ | ✅ (T17) | ✅ (T16/T19) | 🖥️ **Local only** | **Zero** |
+| remove.bg | Freemium | No (AI) | No | No | AI | ☁️ Server | High |
+| Canva Magic Erase | Freemium | No (AI) | No | No | AI | ☁️ Server | High |
+| vayce.app | Free | No | No | No | No | ☁️ Unknown | Unknown |
+| imageonline.io | Free | No | No | No | No | ☁️ Server | Medium |
+| GIMP | Free | No | No | Yes | Yes | 🖥️ Local | Zero |
+| Photoshop | Paid | No | No | Yes | Yes | 🖥️ Local* | Low* |
+| **Recolour (this project)** | **Free** | ✅ | ✅ (T16) | ✅ (T17) | ✅ (T16/T19) | 🖥️ **Local only** | **Zero** |
+
+*Photoshop AI features require cloud.
 
 ### Key gap
-GIMP is the only other truly local free option — but no Delta-E, and high learning curve. **Recolour is the only tool combining local processing + perceptual matching + simple GUI.**
+No free tool combines local processing + perceptual matching + neighbour-aware replacement. **Recolour will be the first.**
+
+---
+
+## UX Principles (informed by competitor review)
+
+1. **Live preview on every control change** — drag tolerance slider = instant pixel feedback (imageonline does this right)
+2. **Simple first, power second** — lead with 3 inputs (image, target colour, replace colour); advanced settings collapsed by default (vayce does the opposite wrong)
+3. **Explicit before/after toggle** — single click, not a workaround; essential since live preview makes before state hard to recall
+4. **Privacy badge always visible** — "🔒 Processed locally — your image never leaves your device"
 
 ---
 
 ## Opportunities
 
 ### 1. Privacy-first positioning
-"100% local — your image never leaves your device" is a headline differentiator. Lean into this explicitly in UI and README. A visible badge in the GUI reinforces trust.
+"100% local — your image never leaves your device" is a headline differentiator vs every free web tool.
 
 ### 2. Chrome Extension (zero-server)
-T14 notes already flag this. Canvas API processing means no Node server needed — reducing friction to near-zero for non-technical users. Strongest privacy story possible.
+Canvas API processing — no Node server needed, strongest privacy story, near-zero friction for non-technical users.
 
 ### 3. Electron desktop app
-Packages the local server into a double-click app. Removes the `node server.js` barrier entirely. Widens addressable audience significantly.
+Double-click app, no `node server.js`. Widens addressable audience significantly.
 
 ### 4. WASM / client-side hosted version
-Host a version where all processing runs in-browser via WebAssembly. Zero upload, but also zero install. Best of both worlds — though higher engineering effort.
+Zero upload + zero install. Best of both worlds — higher engineering effort.
 
 ### 5. Batch processing
-None of the free web tools support batch. Power users (photographers, designers) processing multiple images at once have nowhere to go.
+No free tool supports batch. Unmet need for photographers and designers.
 
 ---
 
 ## Positioning Statement
 
-> For designers, photographers, and power users who need precise colour replacement without sacrificing privacy, Recolour is the only free, local-first tool that uses perceptual Delta-E matching — so your images stay on your machine and the results are actually accurate.
+> For designers, photographers, and power users who need precise colour replacement without sacrificing privacy, Recolour is the only free, local-first tool with perceptual Delta-E matching and neighbour-aware replacement — so your images stay on your machine and the results actually work.
 
 ---
 
@@ -88,7 +119,7 @@ None of the free web tools support batch. Power users (photographers, designers)
 
 | Issue | Feature | Phase |
 |---|---|---|
-| T14 | Local web GUI (drag-drop, before/after, download) | Next |
+| T14 | Local web GUI (drag-drop, live preview, before/after, download) | Next |
 | T17 | Region selection (bounding box) | Near |
 | T18 | DeltaE slider with live pixel-count preview | Near |
 | T16 | Nearest-neighbour inpainting | Mid |

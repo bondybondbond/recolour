@@ -4,7 +4,7 @@ const isNumber = require('./utils/is-number')
 const _Jimp = require('jimp')
 // Fix #18: handle both CJS (Jimp directly) and ESM/webpack builds (Jimp.default)
 const Jimp = _Jimp.default || _Jimp
-const ReplaceColorError = require('./utils/replace-color-error')
+const ReplaceColorError = require('./utils/recolour-error')
 const validateColors = require('./utils/validate-colors')
 
 module.exports = ({

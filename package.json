@@ -1,5 +1,5 @@
 {
-  "name": "@bondybondbond/replace-color",
+  "name": "@bondybondbond/recolour",
   "version": "3.0.0",
   "description": "Replace color with another one pixel by pixel. Fork of turakvlad/replace-color with bug fixes and improvements.",
   "keywords": [
@@ -14,9 +14,9 @@
     "remove watermark",
     "watermark detection"
   ],
-  "homepage": "https://github.com/bondybondbond/replace-color#readme",
-  "bugs": "https://github.com/bondybondbond/replace-color/issues",
-  "repository": "bondybondbond/replace-color",
+  "homepage": "https://github.com/bondybondbond/recolour#readme",
+  "bugs": "https://github.com/bondybondbond/recolour/issues",
+  "repository": "bondybondbond/recolour",
   "license": "MIT",
   "author": "Vladyslav Turak <turakvlad@gmail.com>",
   "contributors": [

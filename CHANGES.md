@@ -1,5 +1,10 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
+## [3.1.1] — 2026-06-24
+
+### Documentation
+- Added **Security considerations** section to README covering: SSRF risk when passing user-supplied URLs, decompression-bomb risk from untrusted image inputs, and event-loop blocking from the synchronous pixel scan on large images.
+
 ## [3.1.0] — 2026-06-23
 
 ### Added

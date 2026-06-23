@@ -207,6 +207,20 @@ replaceColor({}, (err, jimpObject) => {
 
 A recolour `error` instance has the `code` and `field` properties. The package has two codes: `PARAMETER_INVALID` and `PARAMETER_REQUIRED`. The `field` property shows which exact property was not passed or is invalid using the glob notation (e.g. `options.colors.type`). Please, take a look at the [tests](https://github.com/bondybondbond/recolour/tree/master/test/error-handling.js) to see all the possible cases.
 
+## Security considerations
+
+### Remote image fetching (SSRF)
+
+When `image` is a URL string, Jimp fetches it server-side. If your application passes user-supplied URLs to `recolour`, an attacker can target internal hosts (e.g. cloud metadata at `169.254.169.254`) or other services not intended to be reachable. Validate and allowlist remote URLs in your own application layer before passing them to `recolour`.
+
+### Large image memory (decompression bomb)
+
+No file-size or dimension limits are enforced. A small but maliciously crafted image file can decompress to gigapixels and exhaust available memory. If you accept images from untrusted sources, check file size and dimensions before passing the image to `recolour`.
+
+### Synchronous pixel scan
+
+`recolour` scans every pixel synchronously, blocking the Node.js event loop for the duration of the operation. Processing time is O(W × H × number of colour pairs). For large images or high-throughput servers, offload work to a worker thread or child process to avoid stalling other requests.
+
 ## License
 
 [MIT](LICENSE)

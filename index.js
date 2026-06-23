@@ -1,5 +1,5 @@
-const replaceColor = require('./src/replace-color')
-const ReplaceColorError = require('./src/utils/replace-color-error')
+const replaceColor = require('./src/recolour')
+const ReplaceColorError = require('./src/utils/recolour-error')
 
 module.exports = replaceColor
 module.exports.ReplaceColorError = ReplaceColorError

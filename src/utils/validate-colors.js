@@ -20,7 +20,8 @@ module.exports = (colors) => {
 
   if (colors.type === 'hex') {
     isTargetColorValid = typeof colors.targetColor === 'string' && colors.targetColor.length === 7 && hexColorRegex({ strict: true }).test(colors.targetColor)
-    isReplaceColorValid = typeof colors.replaceColor === 'string' && (colors.targetColor.length === 7 || colors.targetColor.length === 9) && hexColorRegex({ strict: true }).test(colors.replaceColor)
+    // Fix: was incorrectly checking colors.targetColor.length instead of colors.replaceColor.length
+    isReplaceColorValid = typeof colors.replaceColor === 'string' && (colors.replaceColor.length === 7 || colors.replaceColor.length === 9) && hexColorRegex({ strict: true }).test(colors.replaceColor)
   }
 
   if (colors.type === 'rgb') {

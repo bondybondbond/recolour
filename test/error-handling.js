@@ -96,6 +96,25 @@ describe('Error handling', function () {
       })
   })
 
+  // B1 regression: original code checked targetColor.length instead of replaceColor.length for AHEX,
+  // so an invalid-length replaceColor would surface as a targetColor error when targetColor was 7 chars.
+  it('should attribute error to "replaceColor" not "targetColor" when replaceColor length is wrong (B1 regression)', (done) => {
+    replaceColor({
+      image: './test/files/watermark.jpg',
+      colors: {
+        type: 'hex',
+        targetColor: '#FFFFFF',
+        replaceColor: '#FFFFFFFF0'
+      }
+    })
+      .catch((err) => {
+        assert.strictEqual(err.code, 'PARAMETER_INVALID')
+        assert.strictEqual(err.field, 'options.colors.replaceColor')
+
+        done()
+      })
+  })
+
   it('should return an error if an "options.colors.targetColor" RGB value is invalid', (done) => {
     replaceColor({
       image: './test/files/watermark.jpg',

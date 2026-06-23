@@ -1,6 +1,6 @@
 {
   "name": "@bondybondbond/recolour",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Replace color with another one pixel by pixel. Fork of turakvlad/replace-color with bug fixes and improvements.",
   "keywords": [
     "CIE76",

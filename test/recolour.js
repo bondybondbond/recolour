@@ -253,4 +253,79 @@ describe('Recolour', function () {
       })
       .catch(done)
   })
+
+  describe('output option', function () {
+    it('should fulfil a promise with a Buffer when output is "buffer"', (done) => {
+      replaceColor({
+        image: './test/files/watermark.jpg',
+        colors: { type: 'hex', targetColor: '#FFB3B5', replaceColor: '#FFFFFF' },
+        output: 'buffer'
+      })
+        .then((result) => {
+          assert.strictEqual(result instanceof Buffer, true)
+
+          done()
+        })
+        .catch(done)
+    })
+
+    it('should fulfil a promise with a Buffer when output is "buffer" and outputMime is JPEG', (done) => {
+      replaceColor({
+        image: './test/files/watermark.jpg',
+        colors: { type: 'hex', targetColor: '#FFB3B5', replaceColor: '#FFFFFF' },
+        output: 'buffer',
+        outputMime: Jimp.MIME_JPEG
+      })
+        .then((result) => {
+          assert.strictEqual(result instanceof Buffer, true)
+
+          done()
+        })
+        .catch(done)
+    })
+
+    it('should fulfil a promise with a base64 data URL when output is "base64"', (done) => {
+      replaceColor({
+        image: './test/files/watermark.jpg',
+        colors: { type: 'hex', targetColor: '#FFB3B5', replaceColor: '#FFFFFF' },
+        output: 'base64'
+      })
+        .then((result) => {
+          assert.match(result, /^data:image\/png;base64,/)
+
+          done()
+        })
+        .catch(done)
+    })
+
+    it('should fulfil a promise with a JPEG base64 data URL when output is "base64" and outputMime is JPEG', (done) => {
+      replaceColor({
+        image: './test/files/watermark.jpg',
+        colors: { type: 'hex', targetColor: '#FFB3B5', replaceColor: '#FFFFFF' },
+        output: 'base64',
+        outputMime: Jimp.MIME_JPEG
+      })
+        .then((result) => {
+          assert.match(result, /^data:image\/jpeg;base64,/)
+
+          done()
+        })
+        .catch(done)
+    })
+
+    it('should fulfil a promise with a Jimp instance when output is "jimp" even if outputMime is set', (done) => {
+      replaceColor({
+        image: './test/files/watermark.jpg',
+        colors: { type: 'hex', targetColor: '#FFB3B5', replaceColor: '#FFFFFF' },
+        output: 'jimp',
+        outputMime: Jimp.MIME_JPEG
+      })
+        .then((result) => {
+          assert.strictEqual(result instanceof Jimp, true)
+
+          done()
+        })
+        .catch(done)
+    })
+  })
 })

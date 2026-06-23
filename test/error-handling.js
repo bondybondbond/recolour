@@ -224,6 +224,43 @@ describe('Error handling', function () {
       })
   })
 
+  it('should return an error if an "options.output" value is invalid', (done) => {
+    replaceColor({
+      image: './test/files/watermark.jpg',
+      colors: {
+        type: 'hex',
+        targetColor: '#FFFFFF',
+        replaceColor: '#000000'
+      },
+      output: 'png'
+    })
+      .catch((err) => {
+        assert.strictEqual(err.code, 'PARAMETER_INVALID')
+        assert.strictEqual(err.field, 'options.output')
+
+        done()
+      })
+  })
+
+  it('should return an error if an "options.outputMime" value is not a string when output is "buffer"', (done) => {
+    replaceColor({
+      image: './test/files/watermark.jpg',
+      colors: {
+        type: 'hex',
+        targetColor: '#FFFFFF',
+        replaceColor: '#000000'
+      },
+      output: 'buffer',
+      outputMime: 42
+    })
+      .catch((err) => {
+        assert.strictEqual(err.code, 'PARAMETER_INVALID')
+        assert.strictEqual(err.field, 'options.outputMime')
+
+        done()
+      })
+  })
+
   it('should return an error if a passed "image" value is invalid', (done) => {
     replaceColor({
       image: './nonExistentFolder/nonExistentImage.jpg',

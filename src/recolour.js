@@ -11,7 +11,9 @@ module.exports = ({
   image,
   colors,
   formula = 'E00',
-  deltaE = 2.3
+  deltaE = 2.3,
+  output = 'jimp',
+  outputMime = Jimp.MIME_PNG
 } = {}, callback) => {
   if (callback) {
     if (typeof callback !== 'function') {
@@ -47,6 +49,14 @@ module.exports = ({
       return callback(new ReplaceColorError('PARAMETER_INVALID', 'options.deltaE'))
     }
 
+    if (!['jimp', 'buffer', 'base64'].includes(output)) {
+      return callback(new ReplaceColorError('PARAMETER_INVALID', 'options.output'))
+    }
+
+    if (output !== 'jimp' && typeof outputMime !== 'string') {
+      return callback(new ReplaceColorError('PARAMETER_INVALID', 'options.outputMime'))
+    }
+
     Jimp.read(image)
       .then((jimpObject) => {
         for (const c of colorsList) {
@@ -68,6 +78,14 @@ module.exports = ({
               if (replaceRGBColor[3] !== null) jimpObject.bitmap.data[idx + 3] = replaceRGBColor[3]
             }
           })
+        }
+
+        if (output === 'buffer') {
+          return jimpObject.getBufferAsync(outputMime).then((buf) => callback(null, buf))
+        }
+
+        if (output === 'base64') {
+          return jimpObject.getBase64Async(outputMime).then((str) => callback(null, str))
         }
 
         callback(null, jimpObject)

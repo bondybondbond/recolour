@@ -1,11 +1,11 @@
 /* eslint-env mocha */
 
 const assert = require('assert')
+const fs = require('fs')
 const Jimp = require('jimp')
 const replaceColor = require('../')
-const requestPromise = require('request-promise')
 
-describe('Replace color', function () {
+describe('Recolour', function () {
   this.timeout(60000)
 
   it('should respect a dual callback / promise API and execute an error-first callback with a Jimp instance', (done) => {
@@ -97,17 +97,15 @@ describe('Replace color', function () {
   })
 
   it('should fulfil a promise with a Jimp instance when an image is a buffer', (done) => {
-    requestPromise({ url: 'https://i.imgur.com/XqNTuzp.jpg', method: 'GET', encoding: null })
-      .then((buffer) => {
-        return replaceColor({
-          image: buffer,
-          colors: {
-            type: 'hex',
-            targetColor: '#FFB3B5',
-            replaceColor: '#FFFFFF'
-          }
-        })
-      })
+    const buffer = fs.readFileSync('./test/files/watermark.jpg')
+    replaceColor({
+      image: buffer,
+      colors: {
+        type: 'hex',
+        targetColor: '#FFB3B5',
+        replaceColor: '#FFFFFF'
+      }
+    })
       .then((jimpObject) => {
         assert.strictEqual(jimpObject instanceof Jimp, true)
 

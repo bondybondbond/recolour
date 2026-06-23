@@ -1,7 +1,7 @@
 {
-  "name": "replace-color",
-  "version": "2.3.0",
-  "description": "Replace color with another one pixel by pixel.",
+  "name": "@bondybondbond/replace-color",
+  "version": "3.0.0",
+  "description": "Replace color with another one pixel by pixel. Fork of turakvlad/replace-color with bug fixes and improvements.",
   "keywords": [
     "CIE76",
     "CIE94",
@@ -14,31 +14,31 @@
     "remove watermark",
     "watermark detection"
   ],
-  "homepage": "https://github.com/turakvlad/replace-color#readme",
-  "bugs": "https://github.com/turakvlad/replace-color/issues",
-  "repository": "turakvlad/replace-color",
+  "homepage": "https://github.com/bondybondbond/replace-color#readme",
+  "bugs": "https://github.com/bondybondbond/replace-color/issues",
+  "repository": "bondybondbond/replace-color",
   "license": "MIT",
   "author": "Vladyslav Turak <turakvlad@gmail.com>",
+  "contributors": [
+    "Manasak (https://github.com/bondybondbond)"
+  ],
   "files": [
     "src"
   ],
   "main": "index.js",
   "scripts": {
-    "test": "standard && mocha"
+    "test": "mocha"
   },
   "dependencies": {
-    "color-convert": "^1.9.3",
-    "delta-e": "0.0.7",
+    "color-convert": "^2.0.1",
+    "delta-e": "^0.0.7",
     "hex-color-regex": "^1.1.0",
-    "jimp": "^0.9.3"
+    "jimp": "^0.22.12"
   },
   "devDependencies": {
-    "mocha": "^5.2.0",
-    "request": "^2.88.0",
-    "request-promise": "^4.2.4",
-    "standard": "^12.0.1"
+    "mocha": "^10.0.0"
   },
   "engines": {
-    "node": ">= 6"
+    "node": ">= 16"
   }
 }

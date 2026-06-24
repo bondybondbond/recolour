@@ -1,29 +1,28 @@
 # GUI Design Session — 24 June 2026
 
 ## Status
-Paused mid-session. Resume tomorrow to finalise architecture decision and hand brief to Claude Code.
+Paused mid-session. Resume next session to build final prototype + write Claude Code brief.
 
 ---
 
 ## Decisions Made ✅
 
-### Architecture (UNDECIDED — debate tomorrow)
-Two options on the table:
+### Architecture — DECIDED: Canvas API (browser-only)
+- Zero-latency live updates — required for "no Apply button" spec
+- Single HTML file, no server, open directly in Chrome
+- Testable locally with Chrome DevTools (including e2e)
+- CWS-ready: same file + manifest.json = Chrome extension
+- Hostable on any static host (GitHub Pages, Netlify) for public access
+- Requires ~50-line deltaE rewrite (Jimp dropped) — acceptable
+- T16/T19 (inpainting, content-aware fill) harder in Canvas — acceptable, both are far-future
+- Performance on very large images (10MP+) may be slow — mitigate later with Web Workers if needed
 
-**Option A: Canvas API (browser-only)**
-- Zero-latency live updates (critical for "no Apply button" spec)
-- Single HTML file, no server
-- CWS-ready out of the box
-- Requires ~50-line deltaE rewrite (Jimp dropped)
-- T16/T19 (inpainting, content-aware) harder in future
-
-**Option B: Node/Express**
-- Keeps all existing Jimp logic (T3–T7)
-- 50–200ms round-trip per slider drag = laggy
-- Incompatible with "live updates, no Apply button" spec
-- Not CWS-able
-
-**Lean:** Canvas API wins given live-update spec. Debate tomorrow.
+### Distribution strategy
+- **Primary:** host on static site (GitHub Pages or Netlify) — public, free
+- **Secondary:** wrap same codebase for CWS — one-time $5 dev fee, parallel channel
+- Single codebase serves both. No divergence.
+- CWS maintenance: low (resubmit on updates, handle rare Chrome API deprecations ~1/year)
+- CWS publisher profile: worth building if extension is quality — cross-promotion between extensions, PM portfolio signal
 
 ---
 
@@ -56,30 +55,28 @@ Two options on the table:
 
 ---
 
-## Tomorrow's Agenda
+## Next Session Agenda
 
-1. **Confirm Canvas API vs Express** — final call
-2. **Build updated Prototype A** with:
+1. **Build updated Prototype A** (final HTML mockup) with:
    - Empty state (dropzone, sidebar greyed)
    - Panel 1: eyedropper well + tolerance slider + "Include shades" toggle
    - Panel 2: 5 recent picks + palette modal + "Smart fill" (future, disabled)
-   - Before/after modal (full-size)
+   - Before/after modal (full-size, after dominant)
    - Export footer button
-3. **Write Claude Code brief** once prototype approved
+2. **Review and approve prototype**
+3. **Write Claude Code brief** for actual build
 
 ---
 
-## Reference: Prototype A (original)
-
-Key things to change in tomorrow's version vs original Prototype A:
-- Remove step-progress tracker from sidebar (not needed in single-page flow)
-- Replace "colour to replace" well with proper eyedropper/magnifier interaction
-- Replace "Replace with" well with 5 recent picks grid + palette opener
-- Add "Include shades" toggle to Panel 1 (below tolerance)
+## Prototype A — Change List vs Original
+- Remove step-progress tracker (not needed in single-page flow)
+- Replace colour wells with: eyedropper/magnifier picker (Panel 1) + 5 recent picks grid with palette opener (Panel 2)
+- Add "Include shades" toggle to Panel 1 (below tolerance slider)
 - Add "Smart fill" toggle to Panel 2 (disabled, future label)
 - Add empty/disabled state for sidebar before image loaded
-- Add before/after modal trigger (not inline)
+- Add before/after modal trigger button (not inline split)
 - Move Export to sidebar footer
+- Remove Reset button (live updates make it less necessary — TBD)
 
 ---
 

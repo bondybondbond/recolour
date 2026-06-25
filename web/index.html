@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recolour</title>
+<link rel="stylesheet" href="styles.css">
+<!--
+  T22 — Production GUI shell (HTML/CSS only, no JavaScript).
+
+  VISUAL-STATE CONTRACT (no JS in T22 — states are switched by a CSS class):
+    • Empty state (default): `.dropzone` shown, `.sidebar.disabled` greyed out.
+    • Loaded state: add `loaded` to `.app` AND remove `disabled` from `.sidebar`.
+      -> `.app.loaded` reveals `.canvas-surface` + `.canvas-hint`, hides `.dropzone`.
+      T23 flips these classes when a real image is loaded.
+
+  Implements the approved design (design/prototype-a.html). The before/after modal
+  (T24), palette opener (T25) and the colour engine wiring (T23) are out of scope here.
+  All copy below — including "Drop image here / click to browse" — is non-functional
+  placeholder text until T23.
+-->
+</head>
+<body>
+
+<header>
+  <div class="logo">re<span>colour</span></div>
+  <div class="header-right">
+    <span class="privacy">🔒 Processed locally — your image never leaves your device</span>
+  </div>
+</header>
+
+<div class="app" id="app">
+  <!-- Canvas -->
+  <div class="canvas-area">
+
+    <!-- Empty state: full-canvas drop zone (visual only in T22) -->
+    <div class="dropzone" id="dropzone">
+      <svg class="upload-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="6" y="10" width="36" height="28" rx="4"/>
+        <circle cx="18" cy="22" r="4"/>
+        <path d="M6 32l10-10 8 8 6-6 12 12" stroke-linejoin="round"/>
+        <path d="M30 6v8M26 8l4-4 4 4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <strong>Drop image here</strong>
+      <p>or click to browse — processed entirely in your browser</p>
+    </div>
+
+    <!-- Loaded state: canvas draw surface (T23 renders into this) + hint pill -->
+    <canvas class="canvas-surface" id="canvas"></canvas>
+    <div class="canvas-hint">👆 Click image, then use the eyedropper to pick a colour</div>
+  </div>
+
+  <!-- Sidebar (disabled until an image is loaded) -->
+  <div class="sidebar disabled" id="sidebar">
+
+    <!-- PANEL 1 — TARGET COLOUR -->
+    <div class="sidebar-section">
+      <div class="section-label"><span class="panel-num">1</span> Target colour</div>
+      <p class="section-sub">Pick the colour you want to change out</p>
+
+      <div class="picker-well" id="pickerWell" title="Click image to pick colour">
+        <div class="loupe" id="loupe">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        </div>
+        <div class="picker-info">
+          <div class="picker-label">Colour to replace</div>
+          <div class="picker-hex" id="pickerHex" style="color:var(--muted)">Click image to pick</div>
+        </div>
+      </div>
+
+      <div class="slider-row">
+        <div class="slider-meta">
+          <span>Exact</span>
+          <span class="val" id="tolVal">35</span>
+          <span>Broad</span>
+        </div>
+        <input type="range" id="tolerance" min="0" max="100" value="35">
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <div class="toggle-label">Include shades</div>
+          <div class="toggle-sub">Match gradient &amp; anti-aliased variants</div>
+        </div>
+        <div class="toggle on"></div>
+      </div>
+    </div>
+
+    <!-- PANEL 2 — REPLACE COLOUR -->
+    <div class="sidebar-section">
+      <div class="section-label"><span class="panel-num">2</span> Replace colour</div>
+      <p class="section-sub">What do you want to replace it with?</p>
+
+      <div class="recent-grid" id="recentGrid">
+        <div class="recent selected" style="background:#ffffff" data-hex="#FFFFFF"></div>
+        <div class="recent" style="background:#000000" data-hex="#000000"></div>
+        <div class="recent" style="background:#4f98a3" data-hex="#4F98A3"></div>
+        <div class="recent" style="background:#e8a355" data-hex="#E8A355"></div>
+        <div class="recent" style="background:#7a5cc4" data-hex="#7A5CC4"></div>
+        <div class="recent" style="background:#c0392b" data-hex="#C0392B"></div>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <div class="toggle-label">Smart fill <span class="future-tag">Soon</span></div>
+          <div class="toggle-sub">Fill from surrounding pixels instead of a flat colour</div>
+        </div>
+        <div class="toggle disabled" title="Coming soon"></div>
+      </div>
+    </div>
+
+    <!-- FOOTER — Reset + Export -->
+    <div class="sidebar-section footer">
+      <div class="footer-row">
+        <button class="btn btn-ghost" id="resetBtn">Reset</button>
+        <button class="btn btn-primary" id="exportBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

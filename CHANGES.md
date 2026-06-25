@@ -1,5 +1,14 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
+## [3.2.0] — 2026-06-25
+
+### Added
+- **Browser GUI shell** (`web/index.html` + `web/styles.css`): two-panel dark-theme interface with empty state (full-canvas dropzone) and loaded visual state (canvas draw surface). CSS-only state switching via `.app.loaded` / `.sidebar.disabled` classes. No JavaScript — visual shell only; interactive wiring lands in T23+.
+  - Panel 1: Target colour — eyedropper well placeholder, tolerance slider (Delta-E 0–100), Include shades toggle.
+  - Panel 2: Replace colour — 6-swatch recent-colours grid, disabled Smart fill toggle (labelled Soon).
+  - Footer: Reset + Export buttons.
+  - Deliberate divergences from T22 issue text (superseded by approved Prototype A): sidebar width 300px (issue said 280px), footer includes Reset + Export (issue listed Export only).
+
 ## [3.1.1] — 2026-06-24
 
 ### Documentation

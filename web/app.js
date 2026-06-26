@@ -33,10 +33,18 @@
   var resetBtn = document.getElementById('resetBtn')
   var canvasArea = canvas.parentNode
 
+  // Before/after modal (T24)
+  var baBtn = document.getElementById('baBtn')
+  var modal = document.getElementById('modal')
+  var modalClose = document.getElementById('modalClose')
+  var baBefore = document.getElementById('baBefore')
+  var baAfter = document.getElementById('baAfter')
+
   var ctx = canvas.getContext('2d', { willReadFrequently: true })
 
   // --- State ---
   var originalImageData = null // immutable source pixels, captured once per load
+  var originalSrc = null       // original image as a data URL, for the modal "before"
   var targetRgb = null         // [r,g,b] of the last picked pixel, or null
   var picking = false          // is eyedropper armed?
 
@@ -79,6 +87,9 @@
     var reader = new FileReader()
     reader.onload = function (e) {
       var img = new Image()
+      // Stash the source data URL BEFORE the (possibly synchronous) onload fires,
+      // so the modal "before" can never read a stale src on a fast-loading image.
+      originalSrc = e.target.result
       img.onload = function () { renderImage(img) }
       img.src = e.target.result // local data URL -> canvas stays untainted
     }
@@ -103,6 +114,7 @@
     targetRgb = null
     disarmPicker()
     resetPickerWell()
+    setBaEnabled(false) // no recolour yet on the new image
   }
 
   // Click-to-browse
@@ -275,11 +287,14 @@
     setPickedColour(rgbToHex(rgba[0], rgba[1], rgba[2]))
     disarmPicker()
     renderPreview()
+    setBaEnabled(true) // a recolour now exists -> before/after is meaningful
   })
 
-  // Esc cancels picker mode with no change.
+  // Esc closes the modal if open (takes priority), else cancels picker mode.
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && picking) disarmPicker()
+    if (e.key !== 'Escape') return
+    if (modal.classList.contains('open')) closeModal()
+    else if (picking) disarmPicker()
   })
 
   // ---------------------------------------------------------------------------
@@ -352,6 +367,7 @@
     targetRgb = null
     disarmPicker()
     resetPickerWell()
+    setBaEnabled(false) // back to the original -> nothing to compare
   })
 
   // Keep the value label in sync and live re-scan as the slider drags (T18).
@@ -359,5 +375,45 @@
   tolerance.addEventListener('input', function () {
     tolVal.textContent = tolerance.value
     schedulePreview()
+  })
+
+  // ---------------------------------------------------------------------------
+  // Before/after modal (T24)
+  // ---------------------------------------------------------------------------
+  // The trigger is disabled until a colour is picked (gated here), so the modal
+  // never opens with two identical images.
+  function setBaEnabled (on) {
+    baBtn.disabled = !on
+  }
+
+  function openModal () {
+    if (!originalImageData) return
+    baBefore.src = originalSrc
+    // After = current canvas pixels (the live preview). Captured as a Blob object
+    // URL rather than a data URL: toDataURL serialises the whole image into an
+    // in-memory string (perf + src length-limit risk on big images, plus a known
+    // re-assignment leak). Snapshot is at open-time — slider drags while the modal
+    // is open won't update it; close + reopen to refresh.
+    canvas.toBlob(function (blob) {
+      if (baAfter._blobUrl) URL.revokeObjectURL(baAfter._blobUrl)
+      baAfter._blobUrl = URL.createObjectURL(blob)
+      baAfter.src = baAfter._blobUrl
+    }, 'image/png')
+    modal.classList.add('open')
+  }
+
+  function closeModal () {
+    modal.classList.remove('open')
+    if (baAfter._blobUrl) {
+      URL.revokeObjectURL(baAfter._blobUrl)
+      baAfter._blobUrl = null
+    }
+  }
+
+  baBtn.addEventListener('click', openModal)
+  modalClose.addEventListener('click', closeModal)
+  // Backdrop click closes; clicks on the inner .modal don't match (no handler there).
+  modal.addEventListener('click', function (e) {
+    if (e.target === modal) closeModal()
   })
 })()

@@ -14,12 +14,16 @@
       -> `.app.loaded` reveals `.canvas-surface` + `.canvas-hint`, hides `.dropzone`.
       T23 flips these classes when a real image is loaded.
 
-  Implements the approved design (design/prototype-a.html). The before/after modal
-  (T24) and palette opener (T25) are out of scope here.
+  Implements the approved design (design/prototype-a.html). The palette opener
+  (T25) is out of scope here.
 
   T23 adds web/app.js (loaded at the foot of <body>): real file loading, canvas
   rendering, the on-canvas eyedropper + magnifier, and a one-shot live preview via
   web/recolour-engine.js. The state classes above are now flipped by app.js.
+
+  T24 adds the before/after comparison modal: a canvas toolbar "Before / After"
+  button (gated until a colour is picked) opens a full-viewport modal with the
+  original beside the recoloured result. Wired in app.js.
 -->
 </head>
 <body>
@@ -34,6 +38,16 @@
 <div class="app" id="app">
   <!-- Canvas -->
   <div class="canvas-area">
+
+    <!-- Canvas toolbar — before/after = modal trigger only (no inline split-view).
+         Hidden until an image is loaded; button stays disabled until a colour is
+         picked (T24, gated by app.js on targetRgb). -->
+    <div class="canvas-toolbar">
+      <button class="btn btn-glass btn-sm" id="baBtn" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
+        Before / After
+      </button>
+    </div>
 
     <!-- Empty state: full-canvas drop zone (visual only in T22) -->
     <div class="dropzone" id="dropzone">
@@ -122,6 +136,21 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- Before/after comparison modal (T24). Opened from #baBtn; populated + closed by
+     app.js. Hidden until `.open` is added. Backdrop click / × / Esc all close it. -->
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Before / After</h3>
+      <button class="modal-close" id="modalClose" aria-label="Close">×</button>
+    </div>
+    <div class="ba-grid">
+      <div class="ba-cell"><div class="ba-label">Before</div><img id="baBefore" alt="Original image"></div>
+      <div class="ba-cell"><div class="ba-label">After</div><img id="baAfter" alt="Recoloured result"></div>
+    </div>
   </div>
 </div>
 

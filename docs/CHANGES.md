@@ -1,5 +1,10 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
+## [3.5.0] — 2026-06-26
+
+### Added
+- **Before / After comparison modal** (`web/index.html`, `web/styles.css`, `web/app.js`): a liquid-glass pill button overlaid on the canvas area (visible once an image is loaded, active only after a colour is picked) opens a full-viewport modal showing the original and recoloured result side by side at equal size. Close via ×, Escape, or backdrop click. The After panel is a snapshot captured at open-time via `canvas.toBlob()` + `URL.createObjectURL()` (blob URL revoked on close) — refresh by closing and reopening after any slider change. Button re-disables on Reset or new image load.
+
 ## [3.4.0] — 2026-06-26
 
 ### Added

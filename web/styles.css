@@ -2,9 +2,9 @@
  * recolour GUI — shell styles (T22).
  *
  * Ported from the approved design/prototype-a.html (T20 approval gate). Only the
- * selectors used by web/index.html are carried over; prototype-only scaffolding
- * (before/after modal, palette opener, canvas toolbar) is intentionally omitted —
- * those land with T23–T25.
+ * selectors used by web/index.html are carried over; remaining prototype-only
+ * scaffolding (palette opener) is omitted until T25. The canvas toolbar +
+ * before/after modal landed with T24 (see the bottom of this file).
  *
  * Empty vs loaded is a pure-CSS visual state driven by `.app.loaded` + the
  * `.sidebar.disabled` class. No JavaScript in T22.
@@ -118,3 +118,53 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
   image-rendering: pixelated;
 }
+
+/* ---------------------------------------------------------------------------
+   Before/after modal (T24)
+   --------------------------------------------------------------------------- */
+
+/* Canvas toolbar — top-right overlay holding the Before/After trigger. Hidden
+   until an image is loaded (mirrors the .app.loaded visual-state contract). */
+.canvas-toolbar { position: absolute; top: 16px; right: 16px; display: none; gap: 8px; z-index: 5; }
+.app.loaded .canvas-toolbar { display: flex; }
+.btn-sm { width: auto; padding: 7px 12px; font-size: 12px; }
+/* Disabled trigger — greyed and inert until a colour has been picked. */
+.btn:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+
+/* Liquid glass — frosted translucent pill with specular edge highlight.
+   Sits over the dark canvas so the blur + gradient reads clearly. */
+.btn-glass {
+  background: linear-gradient(160deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.07) 100%);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255,255,255,0.22);
+  border-radius: 99px;
+  color: rgba(255,255,255,0.92);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.38),
+    inset 0 -1px 0 rgba(0,0,0,0.12),
+    0 4px 16px rgba(0,0,0,0.4);
+  transition: background 0.18s, box-shadow 0.18s, border-color 0.18s;
+}
+.btn-glass:hover {
+  background: linear-gradient(160deg, rgba(255,255,255,0.26) 0%, rgba(255,255,255,0.12) 100%);
+  border-color: rgba(255,255,255,0.35);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.5),
+    inset 0 -1px 0 rgba(0,0,0,0.12),
+    0 6px 22px rgba(0,0,0,0.5);
+}
+
+/* Modal — full-viewport dark backdrop + centred panel. `.open` reveals it. */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 50; }
+.modal-backdrop.open { display: flex; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; width: min(820px, 92vw); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.modal-head h3 { font-size: 15px; font-weight: 600; }
+.modal-close { background: var(--surface2); border: 1px solid var(--border); color: var(--text); width: 30px; height: 30px; border-radius: 6px; cursor: pointer; font-size: 16px; }
+.modal-close:hover { background: var(--border); }
+.ba-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ba-cell { text-align: center; }
+.ba-cell .ba-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; }
+.ba-cell img { width: 100%; border-radius: 6px; border: 1px solid var(--border); }

@@ -1,0 +1,336 @@
+/*
+ * recolour GUI — app glue (T23).
+ *
+ * The first JavaScript layer over the T22 HTML/CSS shell. Wires:
+ *   • file load (drag-drop + click-to-browse) -> draw into <canvas>
+ *   • on-canvas eyedropper with a floating pixel-zoom magnifier loupe
+ *   • pick a pixel -> set target colour -> one-shot live preview (T21 engine)
+ *   • Reset (revert to the original image)
+ *
+ * No modules / no fetch — must run from file:// opened directly in Chrome. The
+ * colour engine is loaded first as a <script> and read off window.RecolourEngine.
+ *
+ * DELIBERATELY NOT the browser EyeDropper API: it is Chromium-only, requires
+ * https/localhost, exits on blur and breaks on file://. We sample getImageData
+ * on the canvas instead (see design/prototype-a.html SPEC + LEARNINGS).
+ */
+(function () {
+  'use strict'
+
+  var Engine = window.RecolourEngine
+
+  // --- DOM refs (all present in the T22 shell) ---
+  var app = document.getElementById('app')
+  var sidebar = document.getElementById('sidebar')
+  var dropzone = document.getElementById('dropzone')
+  var canvas = document.getElementById('canvas')
+  var pickerWell = document.getElementById('pickerWell')
+  var loupe = document.getElementById('loupe')
+  var pickerHex = document.getElementById('pickerHex')
+  var tolerance = document.getElementById('tolerance')
+  var tolVal = document.getElementById('tolVal')
+  var recentGrid = document.getElementById('recentGrid')
+  var resetBtn = document.getElementById('resetBtn')
+  var canvasArea = canvas.parentNode
+
+  var ctx = canvas.getContext('2d', { willReadFrequently: true })
+
+  // --- State ---
+  var originalImageData = null // immutable source pixels, captured once per load
+  var targetRgb = null         // [r,g,b] of the last picked pixel, or null
+  var picking = false          // is eyedropper armed?
+
+  // Floating magnifier (created lazily on first load).
+  var MAG_RADIUS = 4           // 4 px each side of centre -> 9x9 grid
+  var MAG_ZOOM = 14            // on-screen px per source px
+  var MAG_PX = (MAG_RADIUS * 2 + 1) * MAG_ZOOM // 126px square
+  var magCanvas = null
+  var magCtx = null
+
+  // ---------------------------------------------------------------------------
+  // Colour helpers (kept here; the engine stays colour-space only).
+  // ---------------------------------------------------------------------------
+  function toHex2 (n) {
+    var s = n.toString(16)
+    return s.length === 1 ? '0' + s : s
+  }
+
+  function rgbToHex (r, g, b) {
+    return ('#' + toHex2(r) + toHex2(g) + toHex2(b)).toUpperCase()
+  }
+
+  function hexToRgb (hex) {
+    var h = hex.replace('#', '')
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
+  }
+
+  // ---------------------------------------------------------------------------
+  // File loading
+  // ---------------------------------------------------------------------------
+  var fileInput = document.createElement('input')
+  fileInput.type = 'file'
+  fileInput.accept = 'image/*'
+  fileInput.style.display = 'none'
+  document.body.appendChild(fileInput)
+
+  function handleFile (file) {
+    if (!file || file.type.indexOf('image/') !== 0) return // ignore non-images
+    var reader = new FileReader()
+    reader.onload = function (e) {
+      var img = new Image()
+      img.onload = function () { renderImage(img) }
+      img.src = e.target.result // local data URL -> canvas stays untainted
+    }
+    reader.readAsDataURL(file)
+  }
+
+  function renderImage (img) {
+    // Backing store = image-native pixels (NOT DPR-scaled). The pick coordinate
+    // mapping (canvas.width / rect.width) depends on this — see app.js pick logic.
+    canvas.width = img.naturalWidth
+    canvas.height = img.naturalHeight
+    ctx.drawImage(img, 0, 0)
+    originalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+
+    // Flip to loaded state (T22 visual-state contract).
+    app.classList.add('loaded')
+    sidebar.classList.remove('disabled')
+
+    ensureMagnifier()
+    // A fresh image invalidates any previous pick.
+    targetRgb = null
+    disarmPicker()
+    resetPickerWell()
+  }
+
+  // Click-to-browse
+  dropzone.addEventListener('click', function () { fileInput.click() })
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files[0]) handleFile(fileInput.files[0])
+    fileInput.value = '' // allow re-selecting the same file
+  })
+
+  // Drag-and-drop onto the empty-state dropzone.
+  dropzone.addEventListener('dragover', function (e) {
+    e.preventDefault()
+    dropzone.classList.add('dragover')
+  })
+  dropzone.addEventListener('dragleave', function () { dropzone.classList.remove('dragover') })
+  dropzone.addEventListener('drop', function (e) {
+    e.preventDefault()
+    dropzone.classList.remove('dragover')
+    if (e.dataTransfer && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0])
+  })
+
+  // Drag-and-drop onto the canvas area when an image is already loaded (to swap it).
+  canvasArea.addEventListener('dragover', function (e) {
+    e.preventDefault()
+    if (app.classList.contains('loaded')) canvasArea.classList.add('dragover')
+  })
+  canvasArea.addEventListener('dragleave', function (e) {
+    if (!canvasArea.contains(e.relatedTarget)) canvasArea.classList.remove('dragover')
+  })
+  canvasArea.addEventListener('drop', function (e) {
+    e.preventDefault()
+    canvasArea.classList.remove('dragover')
+    if (e.dataTransfer && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0])
+  })
+
+  // Clipboard paste (Ctrl+V / Cmd+V anywhere on the page).
+  document.addEventListener('paste', function (e) {
+    var items = e.clipboardData && e.clipboardData.items
+    if (!items) return
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image/') === 0) {
+        handleFile(items[i].getAsFile())
+        break
+      }
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // Eyedropper picker mode
+  // ---------------------------------------------------------------------------
+  function ensureMagnifier () {
+    if (magCanvas) return
+    magCanvas = document.createElement('canvas')
+    magCanvas.className = 'magnifier'
+    magCanvas.width = MAG_PX
+    magCanvas.height = MAG_PX
+    magCtx = magCanvas.getContext('2d')
+    magCtx.imageSmoothingEnabled = false
+    canvasArea.appendChild(magCanvas)
+  }
+
+  function armPicker () {
+    if (!originalImageData) return
+    picking = true
+    app.classList.add('picking')
+  }
+
+  function disarmPicker () {
+    picking = false
+    app.classList.remove('picking')
+    if (magCanvas) magCanvas.style.display = 'none'
+  }
+
+  // Map a mouse event to integer canvas pixel coords.
+  // scale = canvas.width / rect.width: maps CSS display coords -> image pixels.
+  // Do NOT multiply by devicePixelRatio — the backing store is already image-native.
+  function eventToPixel (e) {
+    var rect = canvas.getBoundingClientRect()
+    var x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width))
+    var y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height))
+    x = Math.max(0, Math.min(canvas.width - 1, x))
+    y = Math.max(0, Math.min(canvas.height - 1, y))
+    return { x: x, y: y }
+  }
+
+  function pixelRgba (x, y) {
+    var d = originalImageData.data
+    var i = (y * canvas.width + x) * 4
+    return [d[i], d[i + 1], d[i + 2], d[i + 3]]
+  }
+
+  // Draw the 9x9 neighbourhood around (cx,cy) into the floating loupe, zoomed,
+  // with a pixel grid and crosshair on the centre cell.
+  function drawMagnifier (e, cx, cy) {
+    magCtx.clearRect(0, 0, MAG_PX, MAG_PX)
+    var d = originalImageData.data
+    var w = canvas.width
+    var h = canvas.height
+    var size = MAG_RADIUS * 2 + 1
+
+    // Draw pixel cells.
+    for (var dy = -MAG_RADIUS; dy <= MAG_RADIUS; dy++) {
+      for (var dx = -MAG_RADIUS; dx <= MAG_RADIUS; dx++) {
+        var sx = cx + dx
+        var sy = cy + dy
+        if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue
+        var i = (sy * w + sx) * 4
+        magCtx.fillStyle = 'rgba(' + d[i] + ',' + d[i + 1] + ',' + d[i + 2] + ',' + (d[i + 3] / 255) + ')'
+        magCtx.fillRect((dx + MAG_RADIUS) * MAG_ZOOM, (dy + MAG_RADIUS) * MAG_ZOOM, MAG_ZOOM, MAG_ZOOM)
+      }
+    }
+
+    // Adaptive grid colour: sample centre pixel luminance (sRGB coefficients),
+    // use dark lines on light backgrounds and light lines on dark backgrounds.
+    var ci = (cy * w + cx) * 4
+    var lum = (0.2126 * d[ci] + 0.7152 * d[ci + 1] + 0.0722 * d[ci + 2]) / 255
+    magCtx.strokeStyle = lum > 0.5 ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.6)'
+    magCtx.lineWidth = 1
+    for (var g = 1; g < size; g++) {
+      magCtx.beginPath(); magCtx.moveTo(g * MAG_ZOOM, 0); magCtx.lineTo(g * MAG_ZOOM, MAG_PX); magCtx.stroke()
+      magCtx.beginPath(); magCtx.moveTo(0, g * MAG_ZOOM); magCtx.lineTo(MAG_PX, g * MAG_ZOOM); magCtx.stroke()
+    }
+
+    // Crosshair box on the centre pixel.
+    magCtx.strokeStyle = '#fff'
+    magCtx.lineWidth = 1.5
+    magCtx.strokeRect(MAG_RADIUS * MAG_ZOOM + 0.5, MAG_RADIUS * MAG_ZOOM + 0.5, MAG_ZOOM - 1, MAG_ZOOM - 1)
+
+    // Position: above-right of the cursor by default so the work area stays visible.
+    // Falls back to below-right if not enough space above; flips left if near right edge.
+    var rect = canvasArea.getBoundingClientRect()
+    var cx2 = e.clientX - rect.left
+    var cy2 = e.clientY - rect.top
+    var left = cx2 + 18
+    var top = cy2 - MAG_PX - 18          // prefer above cursor
+    if (top < 0) top = cy2 + 18           // fall below if too close to top
+    if (left + MAG_PX > rect.width) left = cx2 - MAG_PX - 18  // flip left if near right edge
+    magCanvas.style.left = left + 'px'
+    magCanvas.style.top = top + 'px'
+    magCanvas.style.display = 'block'
+  }
+
+  // Arm via the picker well. stopPropagation: the well wraps the loupe swatch, and
+  // we don't want a re-arm click to bubble onward.
+  pickerWell.addEventListener('click', function (e) {
+    e.stopPropagation()
+    if (picking) disarmPicker()
+    else armPicker()
+  })
+
+  canvas.addEventListener('mousemove', function (e) {
+    if (!picking || !originalImageData) return
+    var p = eventToPixel(e)
+    drawMagnifier(e, p.x, p.y)
+  })
+
+  // Hide the magnifier as soon as the cursor leaves the image or the surrounding area.
+  canvas.addEventListener('mouseleave', function () {
+    if (magCanvas) magCanvas.style.display = 'none'
+  })
+  canvasArea.addEventListener('mouseleave', function () {
+    if (magCanvas) magCanvas.style.display = 'none'
+  })
+
+  canvas.addEventListener('click', function (e) {
+    if (!picking || !originalImageData) return
+    var p = eventToPixel(e)
+    var rgba = pixelRgba(p.x, p.y)
+    targetRgb = [rgba[0], rgba[1], rgba[2]]
+    setPickedColour(rgbToHex(rgba[0], rgba[1], rgba[2]))
+    disarmPicker()
+    renderPreview()
+  })
+
+  // Esc cancels picker mode with no change.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && picking) disarmPicker()
+  })
+
+  // ---------------------------------------------------------------------------
+  // Picker well display
+  // ---------------------------------------------------------------------------
+  function setPickedColour (hex) {
+    loupe.classList.add('picked')
+    loupe.style.setProperty('--picked', hex)
+    pickerHex.textContent = hex
+    pickerHex.style.color = 'var(--text)' // clear the inline muted placeholder colour
+  }
+
+  function resetPickerWell () {
+    loupe.classList.remove('picked')
+    loupe.style.removeProperty('--picked')
+    pickerHex.textContent = 'Click image to pick'
+    pickerHex.style.color = 'var(--muted)'
+  }
+
+  // ---------------------------------------------------------------------------
+  // Preview (one-shot, on pick) + reset
+  // ---------------------------------------------------------------------------
+  function selectedReplaceRgb () {
+    var sel = recentGrid.querySelector('.recent.selected')
+    var hex = (sel && sel.getAttribute('data-hex')) || '#FFFFFF'
+    return hexToRgb(hex)
+  }
+
+  function renderPreview () {
+    if (!originalImageData || !targetRgb) return
+    var replaceRgb = selectedReplaceRgb()
+    var tol = parseInt(tolerance.value, 10)
+    // Always start from a fresh copy — the engine mutates in place.
+    var work = new ImageData(
+      new Uint8ClampedArray(originalImageData.data),
+      canvas.width,
+      canvas.height
+    )
+    Engine.replaceColour(work, targetRgb, replaceRgb, tol)
+    ctx.putImageData(work, 0, 0)
+  }
+
+  resetBtn.addEventListener('click', function () {
+    if (!originalImageData) return
+    ctx.putImageData(originalImageData, 0, 0)
+    targetRgb = null
+    disarmPicker()
+    resetPickerWell()
+  })
+
+  // Keep the tolerance value label in sync (live re-scan is T18).
+  tolerance.addEventListener('input', function () {
+    tolVal.textContent = tolerance.value
+  })
+})()

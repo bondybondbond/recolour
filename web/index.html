@@ -15,9 +15,11 @@
       T23 flips these classes when a real image is loaded.
 
   Implements the approved design (design/prototype-a.html). The before/after modal
-  (T24), palette opener (T25) and the colour engine wiring (T23) are out of scope here.
-  All copy below — including "Drop image here / click to browse" — is non-functional
-  placeholder text until T23.
+  (T24) and palette opener (T25) are out of scope here.
+
+  T23 adds web/app.js (loaded at the foot of <body>): real file loading, canvas
+  rendering, the on-canvas eyedropper + magnifier, and a one-shot live preview via
+  web/recolour-engine.js. The state classes above are now flipped by app.js.
 -->
 </head>
 <body>
@@ -122,6 +124,10 @@
 
   </div>
 </div>
+
+<!-- Colour engine (T21) must load before the app glue (T23) reads its global. -->
+<script src="recolour-engine.js"></script>
+<script src="app.js"></script>
 
 </body>
 </html>

@@ -41,10 +41,15 @@ header { padding: 12px 20px; background: var(--surface); border-bottom: 1px soli
 .dropzone p { color: var(--muted); font-size: 13px; }
 .dropzone strong { color: var(--text); font-size: 15px; }
 
-/* Loaded state — canvas draw surface. Visual placeholder only in T22 (no pixels
-   are rendered; T23 wires real image loading). Shown only when .app is .loaded. */
-.canvas-surface { width: calc(100% - 40px); max-height: calc(100% - 40px); height: auto; aspect-ratio: 4 / 3; border-radius: var(--radius); cursor: crosshair; display: none; background: var(--surface2); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
-.app.loaded .canvas-surface { display: block; }
+/* Loaded state — canvas draw surface. The 4/3 aspect-ratio is an empty-state
+   placeholder; once T23 loads a real image the canvas carries its own width/height
+   attributes, so the override below drops the forced ratio. */
+.canvas-surface { width: calc(100% - 40px); max-height: calc(100% - 40px); height: auto; aspect-ratio: 4 / 3; border-radius: var(--radius); cursor: crosshair; display: none; background: var(--surface2); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); object-fit: contain; }
+.app.loaded .canvas-surface { display: block; aspect-ratio: auto; }
+/* Eyedropper armed: signal pick mode on the canvas. */
+.app.picking .canvas-surface { cursor: crosshair; }
+/* Drag-over while an image is already loaded: outline the canvas area. */
+.app.loaded .canvas-area.dragover::after { content: ''; position: absolute; inset: 4px; border: 2px dashed var(--accent); border-radius: var(--radius); pointer-events: none; background: rgba(79,152,163,0.06); }
 .canvas-hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.7); color: var(--muted); font-size: 12px; padding: 6px 12px; border-radius: 99px; backdrop-filter: blur(8px); border: 1px solid var(--border); display: none; }
 .app.loaded .canvas-hint { display: block; }
 
@@ -63,6 +68,9 @@ header { padding: 12px 20px; background: var(--surface); border-bottom: 1px soli
 .picker-well:hover { border-color: var(--accent); }
 .loupe { width: 48px; height: 48px; border-radius: 6px; flex-shrink: 0; border: 2px solid var(--border); background: repeating-conic-gradient(#333 0% 25%, #1a1a1a 0% 50%) 0 0 / 10px 10px; display: flex; align-items: center; justify-content: center; position: relative; }
 .loupe svg { width: 22px; height: 22px; color: var(--muted); }
+/* Picked state — the loupe becomes a solid swatch of the chosen colour (T23). */
+.loupe.picked { background: var(--picked); border-color: var(--accent); }
+.loupe.picked svg { display: none; }
 .picker-info { flex: 1; min-width: 0; }
 .picker-label { font-size: 12px; color: var(--muted); }
 .picker-hex { font-size: 14px; font-weight: 600; font-family: monospace; margin-top: 2px; }
@@ -101,3 +109,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .footer { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; }
 .footer-row { display: flex; gap: 8px; }
 .footer-row .btn { flex: 1; }
+
+/* Floating eyedropper magnifier (T23) — pixel-zoom loupe that follows the cursor.
+   Created and positioned by app.js; never intercepts pointer events. */
+.magnifier {
+  position: absolute; display: none; z-index: 10; pointer-events: none;
+  border: 2px solid var(--accent); border-radius: 50%; overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+  image-rendering: pixelated;
+}

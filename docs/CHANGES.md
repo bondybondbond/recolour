@@ -1,45 +1,21 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
-## [3.6.0] — 2026-06-27
+## [Unreleased] — Browser GUI (in progress)
 
 ### Added
-- **Panel 2 — Recent colours + palette opener** (`web/index.html`, `web/styles.css`, `web/app.js`): the Replace Colour section now shows a row of up to 5 recently-used replacement colours, most-recent-first. Clicking a swatch instantly sets it as the replacement and re-runs the live preview. A dedicated **+** opener (dashed border, always visible) launches the native colour picker; the chosen colour is added to front, the oldest colour drops off when the cap is reached. History is persisted to `localStorage` (key `recolour:recentColours`) and survives reloads. Degrades gracefully (silent no-op) if `localStorage` is unavailable. First run seeds white and black.
-
-## [3.5.0] — 2026-06-26
-
-### Added
-- **Before / After comparison modal** (`web/index.html`, `web/styles.css`, `web/app.js`): a liquid-glass pill button overlaid on the canvas area (visible once an image is loaded, active only after a colour is picked) opens a full-viewport modal showing the original and recoloured result side by side at equal size. Close via ×, Escape, or backdrop click. The After panel is a snapshot captured at open-time via `canvas.toBlob()` + `URL.createObjectURL()` (blob URL revoked on close) — refresh by closing and reopening after any slider change. Button re-disables on Reset or new image load.
-
-## [3.4.0] — 2026-06-26
-
-### Added
-- **Live tolerance slider** (`web/app.js`): dragging the deltaE tolerance slider now re-runs the colour replacement in real time (T18). Renders are coalesced to one per animation frame via `requestAnimationFrame` to prevent jank on large images. Pending frames are cancelled on Reset and new image load so stale paints cannot fire after state is cleared.
-
-### Changed
-- Default tolerance lowered from 35 to 12 — conservative default that covers JPEG noise without over-removing; users drag up as needed (`web/index.html`).
-
-## [3.3.0] — 2026-06-26
-
-### Added
-- **Browser GUI — interactive wiring** (`web/app.js`): first JavaScript layer over the T22 HTML/CSS shell.
-  - **File loading**: drag-drop onto the empty dropzone, click-to-browse (hidden file input), drag-to-canvas-area when an image is already loaded (to swap it), clipboard paste (Ctrl+V / Cmd+V).
-  - **On-canvas eyedropper**: click the picker well to arm; a floating 9×9 pixel-zoom magnifier loupe tracks the cursor; click to confirm the target colour, Esc to cancel.
-  - **Magnifier loupe**: positioned above-right of cursor; pixel grid with adaptive colour (dark on light, light on dark); hides when cursor leaves the image area.
-  - **One-shot live preview**: on pick, runs `RecolourEngine.replaceColour` with current tolerance + selected replace swatch; result painted to canvas.
-  - **Reset**: restores original image and clears picked colour state.
-
-### Changed
-- Docs reorganised: `PRD.md` + `CHANGES.md` moved to `docs/`; upstream `CHANGELOG.md` + `GUI_SESSION_NOTES.md` archived to `docs/archive/`.
-- `docs/PRD.md` updated with June 2026 competitor intelligence audit and feature-gap tracking table (PictTools, Vayce, Toolschimp, theimagechange.com, imagecolorchanger.com).
-
-## [3.2.0] — 2026-06-25
-
-### Added
-- **Browser GUI shell** (`web/index.html` + `web/styles.css`): two-panel dark-theme interface with empty state (full-canvas dropzone) and loaded visual state (canvas draw surface). CSS-only state switching via `.app.loaded` / `.sidebar.disabled` classes. No JavaScript — visual shell only; interactive wiring lands in T23+.
-  - Panel 1: Target colour — eyedropper well placeholder, tolerance slider (Delta-E 0–100), Include shades toggle.
-  - Panel 2: Replace colour — 6-swatch recent-colours grid, disabled Smart fill toggle (labelled Soon).
+- **Browser GUI shell** (`web/index.html`, `web/styles.css`): two-panel dark-theme interface. Empty state: full-canvas dropzone. Loaded state: canvas draw surface. CSS-only state switching via `.app.loaded` / `.sidebar.disabled`.
+  - Panel 1 (Target colour): eyedropper well, deltaE tolerance slider (0–100, default 12), Include shades toggle.
+  - Panel 2 (Replace colour): recent-colour swatch row (up to 5, persisted to `localStorage`, most-recent-first; seeds white + black on first run), disabled Smart fill toggle (Soon).
   - Footer: Reset + Export buttons.
-  - Deliberate divergences from T22 issue text (superseded by approved Prototype A): sidebar width 300px (issue said 280px), footer includes Reset + Export (issue listed Export only).
+- **Interactive wiring** (`web/app.js`): file loading (drag-drop, click-to-browse, canvas-area swap, clipboard paste), on-canvas eyedropper with 9×9 pixel-zoom magnifier loupe, one-shot live preview on colour pick, Reset.
+- **Live tolerance re-scan**: dragging the tolerance slider re-runs the replacement in real time, coalesced to one render per `requestAnimationFrame`.
+- **Recent colours + palette opener** (Panel 2): swatch click sets replacement colour and re-runs preview; **+** opener adds a new colour via the native colour picker (move-to-front dedupe, cap 5, `localStorage` persistence with graceful fallback).
+- **Before / After comparison modal**: liquid-glass pill button (gated until a colour is picked) opens a full-viewport side-by-side modal. After panel captured via `canvas.toBlob()` + `URL.createObjectURL()`; blob URL revoked on close. Close via ×, Escape, or backdrop click.
+- **Canvas API colour engine** (`web/recolour-engine.js`): pure-JS browser-side deltaE pixel scan — same CIE76/94/2000 formulas as the Node package, no Jimp dependency.
+
+### Changed
+- Default tolerance lowered from 35 to 12.
+- Docs reorganised: `PRD.md` + `CHANGES.md` moved to `docs/`; upstream `CHANGELOG.md` + `GUI_SESSION_NOTES.md` archived to `docs/archive/`.
 
 ## [3.1.1] — 2026-06-24
 

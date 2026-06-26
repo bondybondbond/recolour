@@ -1,5 +1,10 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
+## [3.6.0] — 2026-06-27
+
+### Added
+- **Panel 2 — Recent colours + palette opener** (`web/index.html`, `web/styles.css`, `web/app.js`): the Replace Colour section now shows a row of up to 5 recently-used replacement colours, most-recent-first. Clicking a swatch instantly sets it as the replacement and re-runs the live preview. A dedicated **+** opener (dashed border, always visible) launches the native colour picker; the chosen colour is added to front, the oldest colour drops off when the cap is reached. History is persisted to `localStorage` (key `recolour:recentColours`) and survives reloads. Degrades gracefully (silent no-op) if `localStorage` is unavailable. First run seeds white and black.
+
 ## [3.5.0] — 2026-06-26
 
 ### Added

@@ -30,6 +30,7 @@
   var tolerance = document.getElementById('tolerance')
   var tolVal = document.getElementById('tolVal')
   var recentGrid = document.getElementById('recentGrid')
+  var paletteBtn = document.getElementById('paletteBtn')
   var resetBtn = document.getElementById('resetBtn')
   var canvasArea = canvas.parentNode
 
@@ -47,6 +48,14 @@
   var originalSrc = null       // original image as a data URL, for the modal "before"
   var targetRgb = null         // [r,g,b] of the last picked pixel, or null
   var picking = false          // is eyedropper armed?
+
+  // Replace-colour history (T25). `recents` is the source of truth; localStorage is
+  // a best-effort mirror. `selectedReplaceHex` is tracked in state (not read off the
+  // DOM) so the selection survives a full grid re-render.
+  var STORAGE_KEY = 'recolour:recentColours'
+  var MAX_RECENT = 5
+  var recents = []             // array of uppercase #RRGGBB, most-recent-first
+  var selectedReplaceHex = '#FFFFFF'
 
   // Floating magnifier (created lazily on first load).
   var MAG_RADIUS = 4           // 4 px each side of centre -> 9x9 grid
@@ -315,12 +324,106 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Replace-colour history (T25)
+  // ---------------------------------------------------------------------------
+  // localStorage is best-effort: every access is wrapped so private-mode / disabled
+  // storage degrades to in-session-only history rather than throwing.
+  function loadRecents () {
+    var seed = ['#FFFFFF', '#000000'] // first-run seed; white stays default selected
+    try {
+      var raw = window.localStorage.getItem(STORAGE_KEY)
+      if (!raw) return seed.slice()
+      var arr = JSON.parse(raw)
+      if (!Array.isArray(arr) || !arr.length) return seed.slice()
+      // Keep only well-formed hex, normalise to uppercase, cap to MAX_RECENT.
+      var clean = []
+      for (var i = 0; i < arr.length && clean.length < MAX_RECENT; i++) {
+        if (typeof arr[i] === 'string' && /^#[0-9a-fA-F]{6}$/.test(arr[i])) {
+          clean.push(arr[i].toUpperCase())
+        }
+      }
+      return clean.length ? clean : seed.slice()
+    } catch (e) {
+      return seed.slice()
+    }
+  }
+
+  function saveRecents () {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(recents))
+    } catch (e) { /* storage unavailable — in-memory history still drives the UI */ }
+  }
+
+  // Move-to-front + dedupe + cap. Re-picking an existing colour promotes it to slot 1
+  // (expected, not a bug — dedupe prevents a duplicate entry).
+  function addRecent (hex) {
+    hex = hex.toUpperCase()
+    recents = recents.filter(function (h) { return h !== hex })
+    recents.unshift(hex)
+    if (recents.length > MAX_RECENT) recents = recents.slice(0, MAX_RECENT)
+  }
+
+  // Rebuild the grid from `recents`, marking the selected swatch. Always called on
+  // selection change (cheap at <=5 nodes) so DOM and selectedReplaceHex never desync.
+  function renderRecents () {
+    while (recentGrid.firstChild) recentGrid.removeChild(recentGrid.firstChild)
+    for (var i = 0; i < recents.length; i++) {
+      var hex = recents[i]
+      var sw = document.createElement('div')
+      sw.className = 'recent' + (hex === selectedReplaceHex ? ' selected' : '')
+      sw.style.background = hex
+      sw.setAttribute('data-hex', hex)
+      recentGrid.appendChild(sw)
+    }
+  }
+
+  function selectReplace (hex) {
+    selectedReplaceHex = hex.toUpperCase()
+    renderRecents()
+    renderPreview() // no-ops until a target colour is picked (renderPreview guard)
+  }
+
+  // Swatch selection — delegated on the grid only (the "+" opener lives outside it).
+  recentGrid.addEventListener('click', function (e) {
+    var sw = e.target.closest ? e.target.closest('.recent') : null
+    if (!sw || !recentGrid.contains(sw)) return
+    selectReplace(sw.getAttribute('data-hex'))
+  })
+
+  // "+" opener — its own listener (button is a sibling of #recentGrid). Lazily creates
+  // a hidden <input type=color>; the picked colour is added to history and selected.
+  // NOTE: programmatic .click() works on all desktop browsers; iOS Safari blocks it on
+  // colour inputs (known WebKit limit) — out of scope for this desktop-first tool.
+  var colorInput = null
+  paletteBtn.addEventListener('click', function () {
+    if (!colorInput) {
+      colorInput = document.createElement('input')
+      colorInput.type = 'color'
+      colorInput.style.display = 'none'
+      document.body.appendChild(colorInput)
+      colorInput.addEventListener('input', function () {
+        var hex = colorInput.value.toUpperCase()
+        addRecent(hex)
+        selectedReplaceHex = hex
+        saveRecents()
+        renderRecents()
+        renderPreview()
+      })
+    }
+    colorInput.value = selectedReplaceHex.toLowerCase() // <input type=color> wants lowercase
+    colorInput.click()
+  })
+
+  // Seed history + paint the initial grid (white selected by default).
+  recents = loadRecents()
+  selectedReplaceHex = recents[0] || '#FFFFFF'
+  renderRecents()
+
+  // ---------------------------------------------------------------------------
   // Preview (one-shot, on pick) + reset
   // ---------------------------------------------------------------------------
   function selectedReplaceRgb () {
-    var sel = recentGrid.querySelector('.recent.selected')
-    var hex = (sel && sel.getAttribute('data-hex')) || '#FFFFFF'
-    return hexToRgb(hex)
+    return hexToRgb(selectedReplaceHex || '#FFFFFF')
   }
 
   function renderPreview () {

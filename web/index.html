@@ -14,8 +14,11 @@
       -> `.app.loaded` reveals `.canvas-surface` + `.canvas-hint`, hides `.dropzone`.
       T23 flips these classes when a real image is loaded.
 
-  Implements the approved design (design/prototype-a.html). The palette opener
-  (T25) is out of scope here.
+  Implements the approved design (design/prototype-a.html).
+
+  T25 wires Panel 2: the recent-colour swatch grid (#recentGrid) is now populated
+  by app.js from localStorage-backed history, and the "+" opener (#paletteBtn)
+  launches the native colour picker. See web/app.js.
 
   T23 adds web/app.js (loaded at the foot of <body>): real file loading, canvas
   rendering, the on-canvas eyedropper + magnifier, and a one-shot live preview via
@@ -107,13 +110,13 @@
       <div class="section-label"><span class="panel-num">2</span> Replace colour</div>
       <p class="section-sub">What do you want to replace it with?</p>
 
-      <div class="recent-grid" id="recentGrid">
-        <div class="recent selected" style="background:#ffffff" data-hex="#FFFFFF"></div>
-        <div class="recent" style="background:#000000" data-hex="#000000"></div>
-        <div class="recent" style="background:#4f98a3" data-hex="#4F98A3"></div>
-        <div class="recent" style="background:#e8a355" data-hex="#E8A355"></div>
-        <div class="recent" style="background:#7a5cc4" data-hex="#7A5CC4"></div>
-        <div class="recent" style="background:#c0392b" data-hex="#C0392B"></div>
+      <!-- Recent-colour swatches (T25): app.js owns this grid's contents, rebuilt
+           from localStorage-backed history. The "+" opener lives OUTSIDE the grid
+           (it isn't a recent colour) and has its own listener, not the grid's
+           click delegation. -->
+      <div class="recent-row">
+        <div class="recent-grid" id="recentGrid"></div>
+        <button class="recent recent-add" id="paletteBtn" type="button" title="Pick a new colour" aria-label="Pick a new colour">+</button>
       </div>
 
       <div class="toggle-row">

@@ -92,11 +92,15 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .toggle.disabled { opacity: 0.45; cursor: not-allowed; }
 .future-tag { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #e8a355; background: rgba(232, 163, 85, 0.12); border: 1px solid rgba(232, 163, 85, 0.25); padding: 1px 6px; border-radius: 99px; margin-left: 6px; }
 
-/* Replace colour: recent swatch grid */
-.recent-grid { display: flex; gap: 8px; margin-bottom: 12px; }
+/* Replace colour: recent swatch grid + "+" palette opener (T25) */
+.recent-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.recent-grid { display: flex; gap: 8px; }
 .recent { width: 38px; height: 38px; border-radius: 6px; border: 2px solid var(--border); cursor: pointer; transition: transform 0.12s, border-color 0.12s; }
 .recent:hover { transform: scale(1.08); }
 .recent.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79, 152, 163, 0.35); }
+/* "+" opener: same box as a swatch, dashed/empty look, centred glyph. */
+.recent-add { display: flex; align-items: center; justify-content: center; padding: 0; border-style: dashed; background: var(--surface2); color: var(--muted); font-size: 20px; line-height: 1; font-weight: 400; }
+.recent-add:hover { color: var(--text); border-color: var(--accent); }
 
 /* Buttons */
 .btn { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 16px; border-radius: var(--radius); font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: background 0.15s; width: 100%; }

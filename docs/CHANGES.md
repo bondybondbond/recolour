@@ -1,5 +1,19 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
+## [3.3.0] — 2026-06-26
+
+### Added
+- **Browser GUI — interactive wiring** (`web/app.js`): first JavaScript layer over the T22 HTML/CSS shell.
+  - **File loading**: drag-drop onto the empty dropzone, click-to-browse (hidden file input), drag-to-canvas-area when an image is already loaded (to swap it), clipboard paste (Ctrl+V / Cmd+V).
+  - **On-canvas eyedropper**: click the picker well to arm; a floating 9×9 pixel-zoom magnifier loupe tracks the cursor; click to confirm the target colour, Esc to cancel.
+  - **Magnifier loupe**: positioned above-right of cursor; pixel grid with adaptive colour (dark on light, light on dark); hides when cursor leaves the image area.
+  - **One-shot live preview**: on pick, runs `RecolourEngine.replaceColour` with current tolerance + selected replace swatch; result painted to canvas.
+  - **Reset**: restores original image and clears picked colour state.
+
+### Changed
+- Docs reorganised: `PRD.md` + `CHANGES.md` moved to `docs/`; upstream `CHANGELOG.md` + `GUI_SESSION_NOTES.md` archived to `docs/archive/`.
+- `docs/PRD.md` updated with June 2026 competitor intelligence audit and feature-gap tracking table (PictTools, Vayce, Toolschimp, theimagechange.com, imagecolorchanger.com).
+
 ## [3.2.0] — 2026-06-25
 
 ### Added

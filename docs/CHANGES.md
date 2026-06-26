@@ -1,5 +1,13 @@
 # Changes from upstream (turakvlad/replace-color@2.3.0)
 
+## [3.4.0] — 2026-06-26
+
+### Added
+- **Live tolerance slider** (`web/app.js`): dragging the deltaE tolerance slider now re-runs the colour replacement in real time (T18). Renders are coalesced to one per animation frame via `requestAnimationFrame` to prevent jank on large images. Pending frames are cancelled on Reset and new image load so stale paints cannot fire after state is cleared.
+
+### Changed
+- Default tolerance lowered from 35 to 12 — conservative default that covers JPEG noise without over-removing; users drag up as needed (`web/index.html`).
+
 ## [3.3.0] — 2026-06-26
 
 ### Added

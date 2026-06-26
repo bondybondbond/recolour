@@ -98,7 +98,8 @@
     sidebar.classList.remove('disabled')
 
     ensureMagnifier()
-    // A fresh image invalidates any previous pick.
+    // A fresh image invalidates any previous pick (and any queued preview frame).
+    cancelScheduledPreview()
     targetRgb = null
     disarmPicker()
     resetPickerWell()
@@ -321,16 +322,42 @@
     ctx.putImageData(work, 0, 0)
   }
 
+  // Live re-scan throttle (T18). Each renderPreview() copies the full image and
+  // does an O(W·H) LAB scan; the slider's `input` event fires rapidly on drag, so
+  // coalesce to at most one render per animation frame using the latest value.
+  var previewQueued = false
+  var previewRafId = null
+  function schedulePreview () {
+    if (previewQueued) return
+    previewQueued = true
+    previewRafId = requestAnimationFrame(function () {
+      previewQueued = false
+      previewRafId = null
+      renderPreview()
+    })
+  }
+
+  // Drop any frame queued from a mid-drag slider move. Called when the underlying
+  // state is invalidated (Reset, new image) so a stale render can't fire after.
+  function cancelScheduledPreview () {
+    if (previewRafId) cancelAnimationFrame(previewRafId)
+    previewQueued = false
+    previewRafId = null
+  }
+
   resetBtn.addEventListener('click', function () {
     if (!originalImageData) return
+    cancelScheduledPreview() // drop any frame queued from a mid-drag slider move
     ctx.putImageData(originalImageData, 0, 0)
     targetRgb = null
     disarmPicker()
     resetPickerWell()
   })
 
-  // Keep the tolerance value label in sync (live re-scan is T18).
+  // Keep the value label in sync and live re-scan as the slider drags (T18).
+  // schedulePreview() no-ops until a colour is picked (renderPreview guard).
   tolerance.addEventListener('input', function () {
     tolVal.textContent = tolerance.value
+    schedulePreview()
   })
 })()

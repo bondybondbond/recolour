@@ -33,7 +33,7 @@ Paused mid-session. Resume next session to build final prototype + write Claude 
 
 ### Panel 1 — "Replace this colour"
 - Colour picker well → click opens magnified pixel picker (eyedropper)
-- Tolerance slider (deltaE 0–100), live preview, shows "X px matched" (T18)
+- Tolerance slider (deltaE 0–100), live preview, shows "X px matched" (T18) <!-- [STALE-DOC] pixel-count indicator dropped in T18; live preview + undo (T26) replace it -->
 - Toggle: **"Include shades"** (auto neighbouring colours within tolerance)
 
 ### Panel 2 — "Replace with"
@@ -84,4 +84,4 @@ Paused mid-session. Resume next session to build final prototype + write Claude 
 - T14 — Build local web GUI (this task)
 - T15 — Chrome Web Store (future, Canvas API path enables this)
 - T16 — Nearest-neighbour inpainting ("Smart fill" toggle, future)
-- T18 — deltaE tolerance slider + pixel count (in spec for Panel 1)
+- T18 — deltaE tolerance slider + pixel count (in spec for Panel 1) <!-- [STALE-DOC] pixel-count dropped; shipped as live preview only -->

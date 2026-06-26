@@ -168,7 +168,7 @@ No free tool supports batch. Unmet need for photographers and designers.
 | ----- | --------------------------------------------------------------- | ----- |
 | T14   | Local web GUI (drag-drop, live preview, before/after, download) | Next  |
 | T17   | Region selection (bounding box)                                 | Near  |
-| T18   | DeltaE slider with live pixel-count preview                     | Near  |
+| T18   | DeltaE slider with live preview                                 | Near  |
 | T16   | Nearest-neighbour inpainting                                    | Mid   |
 | T19   | Content-aware fill (OpenCV/Python)                              | Far   |
 

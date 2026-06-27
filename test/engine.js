@@ -207,4 +207,83 @@ describe('recolour engine', function () {
       assert.strictEqual(result.imageData, img)
     })
   })
+
+  // Region selection (T17): the optional 5th arg constrains the scan to a rectangle in
+  // image pixel coords. Omitting it must reproduce the whole-image behaviour exactly.
+  describe('region (T17)', function () {
+    const red = [200, 0, 0]
+    const white = [255, 255, 255]
+
+    describe('replaceColour', function () {
+      it('only replaces matching pixels inside the region; identical colour outside is untouched', () => {
+        // 4x1 strip, all red. Region covers cols 1..2 only.
+        const img = makeImage([red, red, red, red])
+        const { matched } = engine.replaceColour(img, red, white, 5, { x: 1, y: 0, width: 2, height: 1 })
+        assert.strictEqual(matched, 2)
+        assert.deepStrictEqual(pixelAt(img, 0, 0).slice(0, 3), red)   // outside-left: untouched
+        assert.deepStrictEqual(pixelAt(img, 1, 0).slice(0, 3), white) // inside: replaced
+        assert.deepStrictEqual(pixelAt(img, 2, 0).slice(0, 3), white) // inside: replaced
+        assert.deepStrictEqual(pixelAt(img, 3, 0).slice(0, 3), red)   // outside-right: untouched
+      })
+
+      it('constrains a 2D region to its rows and columns', () => {
+        // 3x3 all red; region = the single centre pixel (1,1).
+        const img = makeGrid([
+          [red, red, red],
+          [red, red, red],
+          [red, red, red]
+        ])
+        const { matched } = engine.replaceColour(img, red, white, 5, { x: 1, y: 1, width: 1, height: 1 })
+        assert.strictEqual(matched, 1)
+        assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), white)
+        // every other pixel still red
+        assert.deepStrictEqual(pixelAt(img, 0, 0).slice(0, 3), red)
+        assert.deepStrictEqual(pixelAt(img, 2, 2).slice(0, 3), red)
+        assert.deepStrictEqual(pixelAt(img, 1, 0).slice(0, 3), red)
+      })
+
+      it('omitting the region reproduces whole-image replacement', () => {
+        const img = makeImage([red, red, red, red])
+        const { matched } = engine.replaceColour(img, red, white, 5)
+        assert.strictEqual(matched, 4)
+      })
+
+      it('clamps an over-large region to image bounds (no out-of-range write)', () => {
+        const img = makeImage([red, red])
+        const { matched } = engine.replaceColour(img, red, white, 5, { x: -5, y: -5, width: 100, height: 100 })
+        assert.strictEqual(matched, 2) // clamped to the whole 2x1 image, no throw
+      })
+    })
+
+    describe('smartFill', function () {
+      const A = [0, 100, 0]
+      const T = [200, 0, 0]
+
+      it('only fills target pixels inside the region; matching target outside is left intact', () => {
+        // Two lone red pixels on a green field; region encloses only the left one.
+        const img = makeGrid([
+          [A, A, A, A, A],
+          [A, T, A, T, A],
+          [A, A, A, A, A]
+        ])
+        const { matched, unfilled } = engine.smartFill(img, T, 10, undefined, { x: 0, y: 0, width: 3, height: 3 })
+        assert.strictEqual(matched, 1)   // only the in-region target counted
+        assert.strictEqual(unfilled, 0)
+        assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), A) // inside: filled from neighbours
+        assert.deepStrictEqual(pixelAt(img, 3, 1).slice(0, 3), T) // outside: still target red
+      })
+
+      it('omitting the region reproduces whole-image smart fill', () => {
+        const img = makeGrid([
+          [A, A, A],
+          [A, T, A],
+          [A, A, A]
+        ])
+        const { matched, unfilled } = engine.smartFill(img, T, 10)
+        assert.strictEqual(matched, 1)
+        assert.strictEqual(unfilled, 0)
+        assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), A)
+      })
+    })
+  })
 })

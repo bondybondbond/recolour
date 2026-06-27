@@ -127,12 +127,62 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 
 /* ---------------------------------------------------------------------------
+   Region selection (T17)
+   --------------------------------------------------------------------------- */
+
+/* Pressed state for the "Select area" glass toggle while region-draw mode is armed. */
+.btn-glass.active {
+  background: linear-gradient(160deg, rgba(79,152,163,0.55) 0%, rgba(79,152,163,0.3) 100%);
+  border-color: rgba(79,152,163,0.8);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 4px 16px rgba(0,0,0,0.4);
+}
+
+/* The drawn rectangle. Positioned + sized in CSS px by app.js relative to .canvas-area.
+   The big-spread box-shadow dims everything OUTSIDE the rect (clipped by the area's
+   overflow:hidden) — the standard pro marquee dim with no extra elements. The marching-ants
+   border is four animated background gradients (one per edge) so an active selection reads
+   as live, not a static/disabled dash. pointer-events:none lets picks fall through to the
+   canvas; only the clear handle re-enables them. */
+.region-rect {
+  position: absolute; z-index: 6; pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  background-image:
+    linear-gradient(90deg, var(--accent) 50%, transparent 50%),
+    linear-gradient(90deg, var(--accent) 50%, transparent 50%),
+    linear-gradient(0deg, var(--accent) 50%, transparent 50%),
+    linear-gradient(0deg, var(--accent) 50%, transparent 50%);
+  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
+  background-size: 12px 2px, 12px 2px, 2px 12px, 2px 12px;
+  background-position: 0 0, 0 100%, 0 0, 100% 0;
+  animation: marchingAnts 0.6s linear infinite;
+}
+@keyframes marchingAnts {
+  to { background-position: 12px 0, -12px 100%, 0 -12px, 100% 12px; }
+}
+
+/* Clear (×) handle — top-right corner of the selection. Re-enables pointer events on
+   itself (parent is pointer-events:none). Hidden while actively dragging a new box. */
+.region-clear {
+  position: absolute; top: -12px; right: -12px; width: 24px; height: 24px;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: auto; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.region-clear:hover { background: var(--border); border-color: var(--accent); }
+.region-rect.drawing .region-clear { display: none; }
+
+/* Region-draw mode armed: keep the crosshair explicit on the canvas. */
+.app.selecting .canvas-surface { cursor: crosshair; }
+
+/* ---------------------------------------------------------------------------
    Before/after modal (T24)
    --------------------------------------------------------------------------- */
 
 /* Canvas toolbar — top-right overlay holding the Before/After trigger. Hidden
    until an image is loaded (mirrors the .app.loaded visual-state contract). */
-.canvas-toolbar { position: absolute; top: 16px; right: 16px; display: none; gap: 8px; z-index: 5; }
+/* z-index 7 keeps the toolbar above the region overlay's dim box-shadow (z-index 6, T17). */
+.canvas-toolbar { position: absolute; top: 16px; right: 16px; display: none; gap: 8px; z-index: 7; }
 .app.loaded .canvas-toolbar { display: flex; }
 .btn-sm { width: auto; padding: 7px 12px; font-size: 12px; }
 /* Disabled trigger — greyed and inert until a colour has been picked. */

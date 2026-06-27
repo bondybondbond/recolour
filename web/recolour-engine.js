@@ -65,6 +65,19 @@
     return Math.sqrt((dl * dl) + (da * da) + (db * db))
   }
 
+  // Normalise an optional region {x,y,width,height} into half-open pixel bounds
+  // {x0,y0,x1,y1} clamped to the image (T17). A missing/invalid region → whole image.
+  // Clamping here is the safety guard: callers can pass any rect and the scan can never
+  // read or write outside the buffer.
+  function clampRegion (region, width, height) {
+    if (!region) return { x0: 0, y0: 0, x1: width, y1: height }
+    var x0 = Math.max(0, Math.min(width, Math.floor(region.x)))
+    var y0 = Math.max(0, Math.min(height, Math.floor(region.y)))
+    var x1 = Math.max(x0, Math.min(width, Math.floor(region.x + region.width)))
+    var y1 = Math.max(y0, Math.min(height, Math.floor(region.y + region.height)))
+    return { x0: x0, y0: y0, x1: x1, y1: y1 }
+  }
+
   /*
    * Replace every pixel within `tolerance` Delta-E of `targetRgb` with `replaceRgb`.
    *
@@ -76,22 +89,34 @@
    *        array leaves each matched pixel's original alpha untouched
    *        (mirrors src/recolour.js alpha handling).
    * @param {number} tolerance     Delta-E threshold (0-100). <= matches.
+   * @param {object} [region]      Optional {x,y,width,height} in image pixel coords. When
+   *        supplied, only pixels inside the rectangle are scanned/replaced (T17). Omitted →
+   *        whole image (backwards compatible). Clamped to image bounds so a bad rect can
+   *        never index outside the buffer.
    * @returns {{imageData: ImageData, matched: number}} the same buffer + match count.
    */
-  function replaceColour (imageData, targetRgb, replaceRgb, tolerance) {
+  function replaceColour (imageData, targetRgb, replaceRgb, tolerance, region) {
     const data = imageData.data
+    const width = imageData.width
+    const height = imageData.height
     const targetLab = rgbToLab(targetRgb) // hoisted: compute target LAB once, not per-pixel
     const hasAlpha = replaceRgb.length === 4 && replaceRgb[3] !== undefined
+    const b = clampRegion(region, width, height)
     let matched = 0
 
-    for (let i = 0; i < data.length; i += 4) {
-      const lab = rgbToLab([data[i], data[i + 1], data[i + 2]])
-      if (deltaE76(lab, targetLab) <= tolerance) {
-        data[i] = replaceRgb[0]
-        data[i + 1] = replaceRgb[1]
-        data[i + 2] = replaceRgb[2]
-        if (hasAlpha) data[i + 3] = replaceRgb[3]
-        matched++
+    // Bounded double loop (T17): iterate only the region rows/cols. With the default
+    // whole-image bounds this is the same pixel set as the old flat `for (i…)` scan.
+    for (let y = b.y0; y < b.y1; y++) {
+      for (let x = b.x0; x < b.x1; x++) {
+        const i = (y * width + x) * 4
+        const lab = rgbToLab([data[i], data[i + 1], data[i + 2]])
+        if (deltaE76(lab, targetLab) <= tolerance) {
+          data[i] = replaceRgb[0]
+          data[i + 1] = replaceRgb[1]
+          data[i + 2] = replaceRgb[2]
+          if (hasAlpha) data[i + 3] = replaceRgb[3]
+          matched++
+        }
       }
     }
 
@@ -125,57 +150,69 @@
    * @param {number[]} targetRgb   colour to remove, [r,g,b] (0-255).
    * @param {number} tolerance     Delta-E threshold (0-100). <= matches (same as replaceColour).
    * @param {object} [options]     Accepted for API compatibility; unused by this algorithm.
+   * @param {object} [region]      Optional {x,y,width,height} in image pixel coords. When
+   *        supplied, only pixels inside the rectangle are masked + filled (T17). The region
+   *        edge then acts as a natural boundary: a matched pixel with no in-region non-target
+   *        neighbour in a direction simply has no source there and blends from the others.
+   *        Omitted → whole image. Clamped to image bounds.
    * @returns {{imageData: ImageData, matched: number, unfilled: number}}
    *        unfilled > 0 only when a target pixel has no non-target pixel in any direction
    *        (e.g. an all-target image with no background to sample).
    */
-  function smartFill (imageData, targetRgb, tolerance, options) { // eslint-disable-line no-unused-vars
+  function smartFill (imageData, targetRgb, tolerance, options, region) { // eslint-disable-line no-unused-vars
     var data = imageData.data
     var width = imageData.width
     var height = imageData.height
     var n = width * height
     var targetLab = rgbToLab(targetRgb)
+    var b = clampRegion(region, width, height) // half-open bounds; whole image when no region
+    var p, o, x, y
 
-    // 1. Build the match mask — one O(WH) LAB pass, same as replaceColour.
+    // 1. Build the match mask — one LAB pass over the region (whole image when unbounded),
+    //    same matching rule as replaceColour.
     var mask = new Uint8Array(n)
     var matched = 0
-    for (var p = 0; p < n; p++) {
-      var o = p * 4
-      if (deltaE76(rgbToLab([data[o], data[o + 1], data[o + 2]]), targetLab) <= tolerance) {
-        mask[p] = 1
-        matched++
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        p = y * width + x
+        o = p * 4
+        if (deltaE76(rgbToLab([data[o], data[o + 1], data[o + 2]]), targetLab) <= tolerance) {
+          mask[p] = 1
+          matched++
+        }
       }
     }
 
     // 2. Pre-compute the nearest original non-target pixel index and its distance in each of
-    //    the 4 cardinal directions. Two linear passes per row (L→R, R→L) + two per column
-    //    (T→B, B→T) = O(WH) total. Sentinel: idx = -1 means no boundary in that direction.
+    //    the 4 cardinal directions, scanning only within the region bounds. Two linear passes
+    //    per row (L→R, R→L) + two per column (T→B, B→T). Sentinel: idx = -1 means no boundary
+    //    in that direction (also what the region edge yields — exactly the desired behaviour).
     var lIdx = new Int32Array(n).fill(-1), lDst = new Uint16Array(n)
     var rIdx = new Int32Array(n).fill(-1), rDst = new Uint16Array(n)
     var uIdx = new Int32Array(n).fill(-1), uDst = new Uint16Array(n)
     var dIdx = new Int32Array(n).fill(-1), dDst = new Uint16Array(n)
-    var lastP, lastX, lastY, x, y
+    var lastP, lastX, lastY
 
-    for (y = 0; y < height; y++) {
+    for (y = b.y0; y < b.y1; y++) {
       lastP = -1; lastX = 0
-      for (x = 0; x < width; x++) {
+      for (x = b.x0; x < b.x1; x++) {
         p = y * width + x
         if (!mask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { lIdx[p] = lastP; lDst[p] = x - lastX }
       }
       lastP = -1; lastX = 0
-      for (x = width - 1; x >= 0; x--) {
+      for (x = b.x1 - 1; x >= b.x0; x--) {
         p = y * width + x
         if (!mask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { rIdx[p] = lastP; rDst[p] = lastX - x }
       }
     }
-    for (x = 0; x < width; x++) {
+    for (x = b.x0; x < b.x1; x++) {
       lastP = -1; lastY = 0
-      for (y = 0; y < height; y++) {
+      for (y = b.y0; y < b.y1; y++) {
         p = y * width + x
         if (!mask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { uIdx[p] = lastP; uDst[p] = y - lastY }
       }
       lastP = -1; lastY = 0
-      for (y = height - 1; y >= 0; y--) {
+      for (y = b.y1 - 1; y >= b.y0; y--) {
         p = y * width + x
         if (!mask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { dIdx[p] = lastP; dDst[p] = lastY - y }
       }
@@ -190,21 +227,24 @@
     var unfilled = 0
     var rS, gS, bS, wS, w, idx
 
-    for (p = 0; p < n; p++) {
-      if (!mask[p]) continue
-      rS = 0; gS = 0; bS = 0; wS = 0
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        p = y * width + x
+        if (!mask[p]) continue
+        rS = 0; gS = 0; bS = 0; wS = 0
 
-      idx = lIdx[p]; if (idx >= 0) { w = 1 / lDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-      idx = rIdx[p]; if (idx >= 0) { w = 1 / rDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-      idx = uIdx[p]; if (idx >= 0) { w = 1 / uDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-      idx = dIdx[p]; if (idx >= 0) { w = 1 / dDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+        idx = lIdx[p]; if (idx >= 0) { w = 1 / lDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+        idx = rIdx[p]; if (idx >= 0) { w = 1 / rDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+        idx = uIdx[p]; if (idx >= 0) { w = 1 / uDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+        idx = dIdx[p]; if (idx >= 0) { w = 1 / dDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
 
-      if (wS === 0) { unfilled++; continue }
-      o = p * 4
-      data[o]     = Math.round(rS / wS)
-      data[o + 1] = Math.round(gS / wS)
-      data[o + 2] = Math.round(bS / wS)
-      // alpha preserved (not written) — mirrors replaceColour's 3-element behaviour
+        if (wS === 0) { unfilled++; continue }
+        o = p * 4
+        data[o]     = Math.round(rS / wS)
+        data[o + 1] = Math.round(gS / wS)
+        data[o + 2] = Math.round(bS / wS)
+        // alpha preserved (not written) — mirrors replaceColour's 3-element behaviour
+      }
     }
     if (timing) console.timeEnd('smartFill')
 

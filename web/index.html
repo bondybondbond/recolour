@@ -46,6 +46,12 @@
          Hidden until an image is loaded; button stays disabled until a colour is
          picked (T24, gated by app.js on targetRgb). -->
     <div class="canvas-toolbar">
+      <!-- Region select (T17): toggles drag-to-select mode. Pressed state mirrors
+           `selecting`; app.js manages aria-pressed + the active class. -->
+      <button class="btn btn-glass btn-sm" id="regionBtn" type="button" aria-pressed="false" title="Limit changes to a selected area">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 3"><rect x="3" y="3" width="18" height="18" rx="1"/></svg>
+        Select area
+      </button>
       <button class="btn btn-glass btn-sm" id="baBtn" disabled>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
         Before / After
@@ -66,6 +72,15 @@
 
     <!-- Loaded state: canvas draw surface (T23 renders into this) + hint pill -->
     <canvas class="canvas-surface" id="canvas"></canvas>
+
+    <!-- Region selection overlay (T17). Positioned + sized in CSS px by app.js to mirror the
+         drawn rectangle in image coords. Marching-ants border + a box-shadow that dims
+         everything outside it. pointer-events: none so picks pass through; the clear (×)
+         handle re-enables pointer events on itself. Hidden until a region is drawn. -->
+    <div class="region-rect" id="regionRect" style="display:none">
+      <button class="region-clear" id="regionClear" type="button" title="Clear selected area" aria-label="Clear selected area">×</button>
+    </div>
+
     <div class="canvas-hint">👆 Click image, then use the eyedropper to pick a colour</div>
   </div>
 

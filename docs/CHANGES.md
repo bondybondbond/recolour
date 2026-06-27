@@ -3,6 +3,7 @@
 ## [Unreleased] — Browser GUI (in progress)
 
 ### Added
+- **Region selection** (`web/index.html`, `web/styles.css`, `web/app.js`, `web/recolour-engine.js`): "Select area" button in the canvas toolbar lets the user drag a bounding box on the image; colour replacement and smart fill are then constrained to that rectangle. Marching-ants animated border with exterior dim (`box-shadow`) shows the active selection. A × handle clears the region (committing any in-region work first). Region persists across multiple picks and passes; Reset and new image load also clear it. Engine change is backwards-compatible — omitting the region parameter reproduces the previous whole-image behaviour.
 - **Browser GUI shell** (`web/index.html`, `web/styles.css`): two-panel dark-theme interface. Empty state: full-canvas dropzone. Loaded state: canvas draw surface. CSS-only state switching via `.app.loaded` / `.sidebar.disabled`.
   - Panel 1 (Target colour): eyedropper well, deltaE tolerance slider (0–100, default 12), Include shades toggle.
   - Panel 2 (Replace colour): recent-colour swatch row (up to 5, persisted to `localStorage`, most-recent-first; seeds white + black on first run), Smart fill toggle.
@@ -16,6 +17,7 @@
 - **Smart fill** (`web/recolour-engine.js` `smartFill()`, Panel 2 toggle): replaces matched pixels by sampling the nearest original background pixel in each of 4 cardinal directions and blending with inverse-distance weights — no flat replacement colour required. Enables watermark removal on non-flat backgrounds without knowing the background colour in advance. Algorithm: single-pass cardinal distance-weighted interpolation (not onion-peel); avoids competing propagation fronts that produce chevron seams on gradient backgrounds.
 
 ### Fixed
+- **Region clear (×) no longer replaces entire image** (`web/app.js`): pressing × previously nulled `region` before nulling `targetRgb`, causing a subsequent `renderPreview()` to run the colour replacement over the whole image. Fixed by calling `commitOperation()` first (bakes the in-region result), then nulling `targetRgb`, then clearing the region — preventing any whole-image re-render.
 - **Eyedropper samples current image state** (`web/app.js`): after committing an operation (e.g. smart fill), the loupe and pick now read from the committed canvas state (`baseImageData`) rather than always sampling the original image. Re-picking a previously filled area correctly reflects the filled colours.
 
 ### Changed

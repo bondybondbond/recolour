@@ -37,6 +37,11 @@
   var undoBtn = document.getElementById('undoBtn')
   var canvasArea = canvas.parentNode
 
+  // Region selection (T17)
+  var regionBtn = document.getElementById('regionBtn')
+  var regionRect = document.getElementById('regionRect')
+  var regionClear = document.getElementById('regionClear')
+
   // Before/after modal (T24)
   var baBtn = document.getElementById('baBtn')
   var modal = document.getElementById('modal')
@@ -77,6 +82,17 @@
   // each of the 4 cardinal directions, weighted by 1/distance. The Panel 2 swatches are
   // dimmed + disabled while it's active because the flat colour is not used.
   var smartFillOn = false
+
+  // Region selection (T17). `region` is the active bounding box in IMAGE pixel coords
+  // ({x,y,width,height}) or null for whole-image. `selecting` arms drag-to-draw mode (mutually
+  // exclusive with the eyedropper). The engine honours `region` on every renderPreview(); the
+  // box persists across picks/passes until Clear or Reset. A degenerate drag (a bare click or
+  // sub-MIN_REGION box) is discarded so the engine never receives a 0×0 rect.
+  var region = null
+  var selecting = false
+  var dragging = false
+  var dragAnchor = null
+  var MIN_REGION = 4 // image px — below this on either axis the drag is treated as a click
 
   // Floating magnifier (created lazily on first load).
   var MAG_RADIUS = 4           // 4 px each side of centre -> 9x9 grid
@@ -150,7 +166,10 @@
     // A fresh image invalidates any previous pick (and any queued preview frame).
     cancelScheduledPreview()
     targetRgb = null
+    region = null // a new image drops any prior selection (T17)
+    regionRect.style.display = 'none'
     disarmPicker()
+    exitSelecting()
     resetPickerWell()
     updateControls() // no recolour yet on the new image -> undo + before/after disabled
   }
@@ -216,6 +235,7 @@
 
   function armPicker () {
     if (!originalImageData) return
+    exitSelecting() // picker and region-draw are mutually exclusive modes (T17)
     picking = true
     app.classList.add('picking')
   }
@@ -339,6 +359,7 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       if (modal.classList.contains('open')) closeModal()
+      else if (selecting) exitSelecting() // cancel an armed region-draw (T17)
       else if (picking) disarmPicker()
       return
     }
@@ -350,6 +371,125 @@
       undo()
     }
   })
+
+  // ---------------------------------------------------------------------------
+  // Region selection (T17)
+  // ---------------------------------------------------------------------------
+  // Arm/disarm drag-to-draw mode. Entering disarms the eyedropper (mutually exclusive);
+  // the button's pressed state + ARIA mirror `selecting`.
+  function enterSelecting () {
+    if (!originalImageData) return
+    disarmPicker()
+    selecting = true
+    app.classList.add('selecting')
+    regionBtn.classList.add('active')
+    regionBtn.setAttribute('aria-pressed', 'true')
+  }
+
+  function exitSelecting () {
+    selecting = false
+    app.classList.remove('selecting')
+    regionBtn.classList.remove('active')
+    regionBtn.setAttribute('aria-pressed', 'false')
+  }
+
+  regionBtn.addEventListener('click', function () {
+    if (selecting) exitSelecting()
+    else enterSelecting()
+  })
+
+  // Build a region rect (image px) from two pixel points. +1 makes the span inclusive of
+  // both end pixels, so a 1px drag = a 1px-wide region and dragging to the far edge reaches it.
+  function rectFromPoints (a, b) {
+    var x0 = Math.min(a.x, b.x); var x1 = Math.max(a.x, b.x)
+    var y0 = Math.min(a.y, b.y); var y1 = Math.max(a.y, b.y)
+    return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 }
+  }
+
+  // Place + size #regionRect over the canvas, converting an image-px rect to CSS px via the
+  // live canvas vs canvas-area bounding rects (handles letterboxing, scroll, and resize).
+  // Defaults to the stored `region` so resize/scroll reposition without recomputing the rect.
+  function positionRegionOverlay (rect) {
+    rect = rect || region
+    if (!rect) return
+    var cRect = canvas.getBoundingClientRect()
+    var aRect = canvasArea.getBoundingClientRect()
+    var sx = cRect.width / canvas.width
+    var sy = cRect.height / canvas.height
+    regionRect.style.left = ((cRect.left - aRect.left) + rect.x * sx) + 'px'
+    regionRect.style.top = ((cRect.top - aRect.top) + rect.y * sy) + 'px'
+    regionRect.style.width = (rect.width * sx) + 'px'
+    regionRect.style.height = (rect.height * sy) + 'px'
+  }
+
+  // Show/position the committed region overlay (or hide it when there is no region).
+  function refreshRegionOverlay () {
+    if (!region) { regionRect.style.display = 'none'; return }
+    regionRect.classList.remove('drawing')
+    positionRegionOverlay()
+    regionRect.style.display = 'block'
+  }
+
+  function clearRegion () {
+    commitOperation() // bake any live in-region preview before removing the constraint
+    targetRgb = null  // no active pick after clearing — prevents a whole-image re-render
+    region = null
+    regionRect.style.display = 'none'
+    resetPickerWell() // clear the well whether or not a pick was active
+    // renderPreview() intentionally omitted: targetRgb is null so it would no-op, and the
+    // canvas already shows the committed result.
+    updateControls()
+  }
+
+  // mousedown begins the drag on the canvas; move + up are bound to DOCUMENT so a drag that
+  // ends outside the canvas still finalises cleanly. eventToPixel clamps to image bounds, so
+  // an out-of-canvas endpoint yields a valid edge-clamped rect.
+  canvas.addEventListener('mousedown', function (e) {
+    if (!selecting || !originalImageData) return
+    e.preventDefault()
+    dragging = true
+    dragAnchor = eventToPixel(e)
+    document.addEventListener('mousemove', onDragMove)
+    document.addEventListener('mouseup', onDragEnd)
+  })
+
+  function onDragMove (e) {
+    if (!dragging) return
+    var rect = rectFromPoints(dragAnchor, eventToPixel(e))
+    regionRect.classList.add('drawing') // hide the × handle while actively dragging
+    positionRegionOverlay(rect)
+    regionRect.style.display = 'block'
+  }
+
+  function onDragEnd (e) {
+    if (!dragging) return
+    dragging = false
+    document.removeEventListener('mousemove', onDragMove)
+    document.removeEventListener('mouseup', onDragEnd)
+    var rect = rectFromPoints(dragAnchor, eventToPixel(e))
+    dragAnchor = null
+    exitSelecting()
+    // Discard a bare click / sub-MIN_REGION drag — keep the prior region (if any) intact.
+    if (rect.width >= MIN_REGION && rect.height >= MIN_REGION) {
+      region = rect
+      refreshRegionOverlay()
+      renderPreview()
+      updateControls()
+    } else {
+      refreshRegionOverlay() // restore the previous overlay (or stay hidden)
+    }
+  }
+
+  // Clear (×) handle — stopPropagation so the click doesn't bubble to the canvas/area.
+  regionClear.addEventListener('click', function (e) {
+    e.stopPropagation()
+    clearRegion()
+  })
+
+  // Keep the overlay glued to the image when the layout shifts (window resize, or the
+  // sidebar scrolling / changing height). No-op until a region exists.
+  window.addEventListener('resize', function () { if (region) positionRegionOverlay() })
+  sidebar.addEventListener('scroll', function () { if (region) positionRegionOverlay() })
 
   // ---------------------------------------------------------------------------
   // Picker well display
@@ -502,9 +642,10 @@
       canvas.height
     )
     // Smart fill (T16) reconstructs matched pixels from their neighbours and ignores the
-    // selected replace colour; the flat path overwrites them with it.
-    if (smartFillOn) Engine.smartFill(work, targetRgb, tol)
-    else Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol)
+    // selected replace colour; the flat path overwrites them with it. `region` (T17) is null
+    // for whole-image and constrains both paths to the drawn box when set.
+    if (smartFillOn) Engine.smartFill(work, targetRgb, tol, undefined, region)
+    else Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol, region)
     ctx.putImageData(work, 0, 0)
   }
 
@@ -583,7 +724,10 @@
     )
     undoStack = []
     targetRgb = null
+    region = null // Reset returns to whole-image (T17)
+    regionRect.style.display = 'none'
     disarmPicker()
+    exitSelecting()
     resetPickerWell()
     updateControls() // back to the original -> undo + before/after disabled
   })

@@ -136,6 +136,31 @@
     return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
   }
 
+  // HSV helpers — drive the T28 picker's SV box + hue slider. h in [0,360), s/v in [0,1].
+  function hsvToRgb (h, s, v) {
+    h = (h % 360 + 360) % 360
+    var c = v * s
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1))
+    var m = v - c
+    var r = 0, g = 0, b = 0
+    if (h < 60) { r = c; g = x } else if (h < 120) { r = x; g = c } else if (h < 180) { g = c; b = x } else if (h < 240) { g = x; b = c } else if (h < 300) { r = x; b = c } else { r = c; b = x }
+    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
+  }
+
+  function rgbToHsv (r, g, b) {
+    r /= 255; g /= 255; b /= 255
+    var max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min
+    var h = 0
+    if (d !== 0) {
+      if (max === r) h = ((g - b) / d) % 6
+      else if (max === g) h = (b - r) / d + 2
+      else h = (r - g) / d + 4
+      h *= 60
+      if (h < 0) h += 360
+    }
+    return { h: h, s: max === 0 ? 0 : d / max, v: max }
+  }
+
   // ---------------------------------------------------------------------------
   // File loading
   // ---------------------------------------------------------------------------
@@ -379,7 +404,8 @@
   // Keyboard: Esc closes the modal (priority) else cancels picker mode; Ctrl/Cmd+Z undoes.
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
-      if (modal.classList.contains('open')) closeModal()
+      if (pickerOpen) cancelPicker() // colour popover takes priority (T28)
+      else if (modal.classList.contains('open')) closeModal()
       else if (resizing) cancelResize() // restore pre-drag bounds (T33) — before draw/pick
       else if (selecting) exitSelecting() // cancel an armed region-draw (T17)
       else if (picking) disarmPicker()
@@ -659,28 +685,184 @@
     selectReplace(sw.getAttribute('data-hex'))
   })
 
-  // "+" opener — its own listener (button is a sibling of #recentGrid). Lazily creates
-  // a hidden <input type=color>; the picked colour is added to history and selected.
-  // NOTE: programmatic .click() works on all desktop browsers; iOS Safari blocks it on
-  // colour inputs (known WebKit limit) — out of scope for this desktop-first tool.
-  var colorInput = null
+  // "+" opener — custom popover (T28), replacing the native <input type=color> (Chrome
+  // pinned that to the viewport top-left — WORKFLOW-7). A single {h,s,v} draft is the
+  // source of truth: the SV box + hue slider write to it; hex (primary) and RGB
+  // (secondary) inputs mirror it. The draft is committed to recents ONLY on confirm so
+  // dragging doesn't spam history; Esc / outside-click cancels and leaves the prior
+  // selection untouched (selectedReplaceHex is never mutated until confirm).
+  var pickerPopover = document.getElementById('pickerPopover')
+  var pickerSv = document.getElementById('pickerSv')
+  var pickerSvThumb = document.getElementById('pickerSvThumb')
+  var pickerHue = document.getElementById('pickerHue')
+  var pickerHueThumb = document.getElementById('pickerHueThumb')
+  var pickerSwatch = document.getElementById('pickerSwatch')
+  var pickerHexInput = document.getElementById('pickerHexInput')
+  var pickerHexField = pickerHexInput.parentNode
+  var pickerR = document.getElementById('pickerR')
+  var pickerG = document.getElementById('pickerG')
+  var pickerB = document.getElementById('pickerB')
+  var pickerCancel = document.getElementById('pickerCancel')
+  var pickerConfirm = document.getElementById('pickerConfirm')
+
+  var draft = { h: 0, s: 0, v: 1 } // live picker state while open
+  var prevHex = '#FFFFFF'          // selection snapshot, restored on cancel
+  var pickerOpen = false
+
+  function clamp01 (n) { return n < 0 ? 0 : (n > 1 ? 1 : n) }
+  function clampByte (val) {
+    if (val === '' || val == null) return null
+    var n = parseInt(val, 10)
+    if (isNaN(n)) return null
+    return n < 0 ? 0 : (n > 255 ? 255 : n)
+  }
+
+  // Push the draft into every control + the preview swatch. `skip` ('hex'|'rgb') leaves
+  // the field the user is typing in alone so we don't fight their caret.
+  function syncPicker (skip) {
+    var rgb = hsvToRgb(draft.h, draft.s, draft.v)
+    var hex = rgbToHex(rgb[0], rgb[1], rgb[2])
+    var hue = hsvToRgb(draft.h, 1, 1)
+    pickerSwatch.style.background = hex
+    pickerSv.style.backgroundColor = rgbToHex(hue[0], hue[1], hue[2])
+    pickerSvThumb.style.left = (draft.s * 100) + '%'
+    pickerSvThumb.style.top = ((1 - draft.v) * 100) + '%'
+    pickerHueThumb.style.left = ((draft.h / 360) * 100) + '%'
+    if (skip !== 'hex') pickerHexInput.value = hex
+    if (skip !== 'rgb') { pickerR.value = rgb[0]; pickerG.value = rgb[1]; pickerB.value = rgb[2] }
+    pickerHexField.classList.remove('invalid')
+  }
+
+  // Anchor to #paletteBtn: right-aligned, below by default, flipped above near the
+  // viewport bottom. position:fixed in CSS, so coords are viewport-relative.
+  function positionPicker () {
+    var r = paletteBtn.getBoundingClientRect()
+    var pw = pickerPopover.offsetWidth
+    var ph = pickerPopover.offsetHeight
+    var gap = 8
+    var left = r.right - pw
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - 8 - pw
+    if (left < 8) left = 8
+    var top = r.bottom + gap
+    if (top + ph > window.innerHeight - 8) top = r.top - gap - ph
+    if (top < 8) top = 8
+    pickerPopover.style.left = left + 'px'
+    pickerPopover.style.top = top + 'px'
+  }
+
+  function onOutside (e) {
+    if (!pickerPopover.contains(e.target) && e.target !== paletteBtn) cancelPicker()
+  }
+
+  function openPicker () {
+    prevHex = selectedReplaceHex || '#FFFFFF'
+    var rgb = hexToRgb(prevHex)
+    draft = rgbToHsv(rgb[0], rgb[1], rgb[2])
+    syncPicker()
+    pickerPopover.classList.add('open')
+    pickerOpen = true
+    positionPicker() // measure after display:flex so offsetWidth/Height are real
+    // Defer so the opening click's own mousedown doesn't immediately close the popover.
+    setTimeout(function () { document.addEventListener('mousedown', onOutside) }, 0)
+  }
+
+  function closePicker () {
+    pickerPopover.classList.remove('open')
+    pickerOpen = false
+    document.removeEventListener('mousedown', onOutside)
+  }
+
+  // Commit: the one intentional canvas repaint happens here, not during drag.
+  function confirmPicker () {
+    var rgb = hsvToRgb(draft.h, draft.s, draft.v)
+    var hex = rgbToHex(rgb[0], rgb[1], rgb[2])
+    addRecent(hex)
+    selectedReplaceHex = hex
+    saveRecents()
+    renderRecents()
+    renderPreview()
+    closePicker()
+  }
+
+  function cancelPicker () {
+    selectedReplaceHex = prevHex // explicit restore (untouched in practice — never mutated)
+    closePicker()
+  }
+
+  // SV box drag — listeners attach to `document` (not the box) so a release OUTSIDE the
+  // popover still ends the drag instead of sticking (classic colour-picker bug).
+  function svFromEvent (e) {
+    var r = pickerSv.getBoundingClientRect()
+    draft.s = clamp01((e.clientX - r.left) / r.width)
+    draft.v = clamp01(1 - (e.clientY - r.top) / r.height)
+    syncPicker()
+  }
+  function onSvDrag (e) { e.preventDefault(); svFromEvent(e) }
+  pickerSv.addEventListener('mousedown', function (e) {
+    e.preventDefault()
+    svFromEvent(e)
+    document.addEventListener('mousemove', onSvDrag)
+    document.addEventListener('mouseup', function stop () {
+      document.removeEventListener('mousemove', onSvDrag)
+      document.removeEventListener('mouseup', stop)
+    })
+  })
+
+  // Hue slider drag — same document-level pattern.
+  function hueFromEvent (e) {
+    var r = pickerHue.getBoundingClientRect()
+    draft.h = clamp01((e.clientX - r.left) / r.width) * 360
+    syncPicker()
+  }
+  function onHueDrag (e) { e.preventDefault(); hueFromEvent(e) }
+  pickerHue.addEventListener('mousedown', function (e) {
+    e.preventDefault()
+    hueFromEvent(e)
+    document.addEventListener('mousemove', onHueDrag)
+    document.addEventListener('mouseup', function stop () {
+      document.removeEventListener('mousemove', onHueDrag)
+      document.removeEventListener('mouseup', stop)
+    })
+  })
+
+  // Hex field — accepts 3- or 6-digit hex; anything else marks invalid and is ignored.
+  pickerHexInput.addEventListener('input', function () {
+    var raw = pickerHexInput.value.trim()
+    if (!/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(raw)) { pickerHexField.classList.add('invalid'); return }
+    var rgb = hexToRgb(raw)
+    draft = rgbToHsv(rgb[0], rgb[1], rgb[2])
+    syncPicker('hex')
+  })
+  // Snap to canonical form on blur (e.g. a 3-digit or partial entry).
+  pickerHexInput.addEventListener('blur', function () { syncPicker() })
+
+  // RGB triplet — clamp 0–255; an empty/NaN field is left to finish typing. Fields snap
+  // to clamped values on blur so an out-of-range entry doesn't linger.
+  function onRgbInput () {
+    var r = clampByte(pickerR.value), g = clampByte(pickerG.value), b = clampByte(pickerB.value)
+    if (r === null || g === null || b === null) return
+    draft = rgbToHsv(r, g, b)
+    syncPicker('rgb')
+  }
+  pickerR.addEventListener('input', onRgbInput)
+  pickerG.addEventListener('input', onRgbInput)
+  pickerB.addEventListener('input', onRgbInput)
+  function onRgbBlur () { syncPicker() }
+  pickerR.addEventListener('blur', onRgbBlur)
+  pickerG.addEventListener('blur', onRgbBlur)
+  pickerB.addEventListener('blur', onRgbBlur)
+
+  pickerConfirm.addEventListener('click', confirmPicker)
+  pickerCancel.addEventListener('click', cancelPicker)
+  // Enter confirms; Escape is handled by the shared priority chain above.
+  document.addEventListener('keydown', function (e) {
+    if (pickerOpen && e.key === 'Enter') { e.preventDefault(); confirmPicker() }
+  })
+  window.addEventListener('resize', function () { if (pickerOpen) positionPicker() })
+
+  // The "+" button toggles the popover (button is a sibling of #recentGrid).
   paletteBtn.addEventListener('click', function () {
-    if (!colorInput) {
-      colorInput = document.createElement('input')
-      colorInput.type = 'color'
-      colorInput.style.display = 'none'
-      document.body.appendChild(colorInput)
-      colorInput.addEventListener('input', function () {
-        var hex = colorInput.value.toUpperCase()
-        addRecent(hex)
-        selectedReplaceHex = hex
-        saveRecents()
-        renderRecents()
-        renderPreview()
-      })
-    }
-    colorInput.value = selectedReplaceHex.toLowerCase() // <input type=color> wants lowercase
-    colorInput.click()
+    if (pickerOpen) closePicker(); else openPicker()
   })
 
   // Seed history + paint the initial grid (white selected by default).

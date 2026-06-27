@@ -189,6 +189,42 @@
   </div>
 </div>
 
+<!-- Custom colour-picker popover (T28). Replaces the native <input type=color>, which
+     Chrome pinned to the top-left of the viewport (WORKFLOW-7). app.js positions this
+     with position:fixed + a smart flip relative to #paletteBtn, and toggles `.open`.
+     The SV box + hue slider are the visual picker; the hex field (primary) and the RGB
+     triplet (secondary) are always visible — no HSL, no mode switching. The colour is
+     committed to recents only on "Use colour"; Esc / outside-click cancels. -->
+<div class="picker-popover" id="pickerPopover" role="dialog" aria-label="Choose a replacement colour">
+  <!-- Saturation (x) / value (y) square. Base hue set inline by app.js; the two CSS
+       gradients (white→transparent, transparent→black) overlay it. -->
+  <div class="picker-sv" id="pickerSv">
+    <span class="picker-sv-thumb" id="pickerSvThumb"></span>
+  </div>
+  <!-- Hue track (0–360 left→right). -->
+  <div class="picker-hue" id="pickerHue">
+    <span class="picker-hue-thumb" id="pickerHueThumb"></span>
+  </div>
+  <div class="picker-fields">
+    <span class="picker-swatch" id="pickerSwatch" aria-hidden="true"></span>
+    <div class="picker-inputs">
+      <label class="picker-field picker-hex-field">
+        <span>Hex</span>
+        <input type="text" id="pickerHexInput" maxlength="7" spellcheck="false" autocomplete="off" inputmode="text">
+      </label>
+      <div class="picker-rgb">
+        <label class="picker-field"><span>R</span><input type="number" id="pickerR" min="0" max="255" step="1"></label>
+        <label class="picker-field"><span>G</span><input type="number" id="pickerG" min="0" max="255" step="1"></label>
+        <label class="picker-field"><span>B</span><input type="number" id="pickerB" min="0" max="255" step="1"></label>
+      </div>
+    </div>
+  </div>
+  <div class="picker-actions">
+    <button class="btn btn-ghost btn-sm" id="pickerCancel" type="button">Cancel</button>
+    <button class="btn btn-primary btn-sm" id="pickerConfirm" type="button">Use colour</button>
+  </div>
+</div>
+
 <!-- Colour engine (T21) must load before the app glue (T23) reads its global. -->
 <script src="recolour-engine.js"></script>
 <script src="app.js"></script>

@@ -93,6 +93,15 @@
   var dragging = false
   var dragAnchor = null
   var MIN_REGION = 4 // image px — below this on either axis the drag is treated as a click
+  // Live-preview snapshot for the loupe (T33-fix). renderPreview() stores the `work`
+  // ImageData here so drawMagnifier/pixelRgba can show the in-progress result rather than
+  // the stale committed base. Cleared whenever targetRgb is discarded (undo, reset, etc.).
+  var livePreviewImageData = null
+  // Resize (T33). `resizing` is the active handle id ('nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w')
+  // while a handle is dragged, else null. `regionBeforeResize` snapshots the box at drag
+  // start so Esc can restore it. Resize only ever mutates an existing committed region.
+  var resizing = null
+  var regionBeforeResize = null
 
   // Floating magnifier (created lazily on first load).
   var MAG_RADIUS = 4           // 4 px each side of centre -> 9x9 grid
@@ -166,6 +175,7 @@
     // A fresh image invalidates any previous pick (and any queued preview frame).
     cancelScheduledPreview()
     targetRgb = null
+    livePreviewImageData = null // any prior preview is for a different image
     region = null // a new image drops any prior selection (T17)
     regionRect.style.display = 'none'
     disarmPicker()
@@ -263,7 +273,7 @@
   // smart-filling a watermark, hovering/clicking that area reflects the filled colours, not
   // the original red. Called after commitOperation() so baseImageData is already up-to-date.
   function pixelRgba (x, y) {
-    var d = baseImageData.data
+    var d = (livePreviewImageData || baseImageData).data
     var i = (y * canvas.width + x) * 4
     return [d[i], d[i + 1], d[i + 2], d[i + 3]]
   }
@@ -272,7 +282,10 @@
   // with a pixel grid and crosshair on the centre cell.
   function drawMagnifier (e, cx, cy) {
     magCtx.clearRect(0, 0, MAG_PX, MAG_PX)
-    var d = baseImageData.data // committed state — shows filled colours, not the original
+    // Read from the live preview when one is active so the loupe shows in-progress results
+    // (e.g. which red pixels have been recoloured at the current tolerance). Falls back to
+    // the committed base when no preview is running.
+    var d = (livePreviewImageData || baseImageData).data
     var w = canvas.width
     var h = canvas.height
     var size = MAG_RADIUS * 2 + 1
@@ -359,6 +372,7 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       if (modal.classList.contains('open')) closeModal()
+      else if (resizing) cancelResize() // restore pre-drag bounds (T33) — before draw/pick
       else if (selecting) exitSelecting() // cancel an armed region-draw (T17)
       else if (picking) disarmPicker()
       return
@@ -485,6 +499,68 @@
     e.stopPropagation()
     clearRegion()
   })
+
+  // Resize handles (T33). mousedown on a handle starts a resize; move + up bind to DOCUMENT
+  // so a drag that leaves the canvas still finalises. We work in IMAGE-pixel edges (L/T/R/B)
+  // — never width/height deltas from a fixed origin — so dragging a top/left handle moves
+  // region.x/region.y correctly (avoids the classic NW/N/W origin-drift bug). The overlay is
+  // repositioned every frame via positionRegionOverlay(); the engine re-runs via the rAF
+  // throttle. Handles only exist on a committed overlay, so `region` is guaranteed non-null.
+  regionRect.addEventListener('mousedown', function (e) {
+    var handle = e.target.getAttribute && e.target.getAttribute('data-handle')
+    if (!handle || !region || selecting) return
+    e.preventDefault()
+    e.stopPropagation() // don't let the canvas start a draw / the area swallow it
+    resizing = handle
+    regionBeforeResize = region
+    document.addEventListener('mousemove', onResizeMove)
+    document.addEventListener('mouseup', onResizeEnd)
+  })
+
+  function onResizeMove (e) {
+    if (!resizing) return
+    var p = eventToPixel(e) // already clamped to image bounds
+    // Inclusive edges of the current box; replace only the edges this handle controls.
+    var L = region.x; var R = region.x + region.width - 1
+    var T = region.y; var B = region.y + region.height - 1
+    if (resizing.indexOf('w') !== -1) L = p.x
+    if (resizing.indexOf('e') !== -1) R = p.x
+    if (resizing.indexOf('n') !== -1) T = p.y
+    if (resizing.indexOf('s') !== -1) B = p.y
+    // Clamp live to MIN_REGION against the fixed opposite edge — never flip past it.
+    if (resizing.indexOf('w') !== -1) L = Math.min(L, R - (MIN_REGION - 1))
+    if (resizing.indexOf('e') !== -1) R = Math.max(R, L + (MIN_REGION - 1))
+    if (resizing.indexOf('n') !== -1) T = Math.min(T, B - (MIN_REGION - 1))
+    if (resizing.indexOf('s') !== -1) B = Math.max(B, T + (MIN_REGION - 1))
+    // Edges are already clamped + ordered, so build the rect directly — do NOT route through
+    // rectFromPoints (it normalises arbitrary corners, wrong for clamped edges).
+    region = { x: L, y: T, width: R - L + 1, height: B - T + 1 }
+    positionRegionOverlay() // every frame — keeps x/y in lockstep with the moving edge
+    schedulePreview()       // throttled engine re-run (rAF coalesced)
+  }
+
+  function onResizeEnd () {
+    if (!resizing) return
+    document.removeEventListener('mousemove', onResizeMove)
+    document.removeEventListener('mouseup', onResizeEnd)
+    resizing = null
+    regionBeforeResize = null
+    renderPreview()  // final, un-throttled paint at the committed bounds
+    updateControls()
+  }
+
+  // Abort an in-flight resize and restore the pre-drag bounds.
+  function cancelResize () {
+    if (!resizing) return
+    document.removeEventListener('mousemove', onResizeMove)
+    document.removeEventListener('mouseup', onResizeEnd)
+    region = regionBeforeResize
+    resizing = null
+    regionBeforeResize = null
+    cancelScheduledPreview() // drop any frame queued mid-drag
+    positionRegionOverlay()
+    renderPreview()
+  }
 
   // Keep the overlay glued to the image when the layout shifts (window resize, or the
   // sidebar scrolling / changing height). No-op until a region exists.
@@ -647,6 +723,7 @@
     if (smartFillOn) Engine.smartFill(work, targetRgb, tol, undefined, region)
     else Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol, region)
     ctx.putImageData(work, 0, 0)
+    livePreviewImageData = work // loupe reads this so it shows the in-progress result
   }
 
   // ---------------------------------------------------------------------------
@@ -660,6 +737,7 @@
     if (undoStack.length > MAX_UNDO) undoStack.shift() // push first, then drop oldest
     // The live preview is already painted on the canvas -> snapshot it as the new base.
     baseImageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    livePreviewImageData = null // baseImageData now IS the former preview; no separate cache needed
   }
 
   // Step back one change. Two cases: a live (uncommitted) op is discarded first;
@@ -670,6 +748,7 @@
     if (targetRgb) {
       // Discard the live, uncommitted op -> repaint the committed base.
       targetRgb = null
+      livePreviewImageData = null // stale preview no longer valid — loupe reads baseImageData
       ctx.putImageData(baseImageData, 0, 0)
       disarmPicker()
       resetPickerWell()
@@ -724,6 +803,7 @@
     )
     undoStack = []
     targetRgb = null
+    livePreviewImageData = null // preview invalidated by reset
     region = null // Reset returns to whole-image (T17)
     regionRect.style.display = 'none'
     disarmPicker()

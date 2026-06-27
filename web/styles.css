@@ -44,7 +44,11 @@ header { padding: 12px 20px; background: var(--surface); border-bottom: 1px soli
 /* Loaded state — canvas draw surface. The 4/3 aspect-ratio is an empty-state
    placeholder; once T23 loads a real image the canvas carries its own width/height
    attributes, so the override below drops the forced ratio. */
-.canvas-surface { width: calc(100% - 40px); max-height: calc(100% - 40px); height: auto; aspect-ratio: 4 / 3; border-radius: var(--radius); cursor: crosshair; display: none; background: var(--surface2); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); object-fit: contain; }
+/* Constrain by BOTH axes (max-width + max-height, auto sizing) so the browser derives both
+   dimensions from the intrinsic aspect ratio and applies whichever constraint binds. This
+   keeps the display scale uniform (sx === sy) for portrait AND landscape images — a
+   prerequisite for accurate eyedropper / region-drag / resize-handle coordinates (#33). */
+.canvas-surface { max-width: calc(100% - 40px); max-height: calc(100% - 40px); width: auto; height: auto; aspect-ratio: 4 / 3; border-radius: var(--radius); cursor: crosshair; display: none; background: var(--surface2); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); object-fit: contain; }
 .app.loaded .canvas-surface { display: block; aspect-ratio: auto; }
 /* Eyedropper armed: signal pick mode on the canvas. */
 .app.picking .canvas-surface { cursor: crosshair; }
@@ -160,10 +164,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   to { background-position: 12px 0, -12px 100%, 0 -12px, 100% 12px; }
 }
 
-/* Clear (×) handle — top-right corner of the selection. Re-enables pointer events on
-   itself (parent is pointer-events:none). Hidden while actively dragging a new box. */
+/* Clear (×) handle — floats just outside the top-right corner. Nudged out to -28px and
+   lifted above the resize handles (z-index 2, T33) so it stays fully clickable and doesn't
+   collide with the `ne` corner handle. Re-enables pointer events on itself (parent is
+   pointer-events:none). Hidden while actively dragging a new box. */
 .region-clear {
-  position: absolute; top: -12px; right: -12px; width: 24px; height: 24px;
+  position: absolute; top: -28px; right: -28px; width: 24px; height: 24px; z-index: 2;
   border-radius: 50%; border: 1px solid var(--border); background: var(--surface2);
   color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
@@ -171,6 +177,30 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 }
 .region-clear:hover { background: var(--border); border-color: var(--accent); }
 .region-rect.drawing .region-clear { display: none; }
+
+/* Resize handles (T33). A 12px visual dot but a larger pointer hit-target via padding +
+   negative margin (matches pro-editor ergonomics). pointer-events:auto so they're draggable
+   while the parent rect stays pointer-events:none (picks fall through everywhere else).
+   background-clip:content-box so the padding stays an invisible hit-zone, not a coloured ring. */
+.region-handle {
+  position: absolute; width: 12px; height: 12px; padding: 4px; margin: -4px;
+  background: var(--accent); background-clip: content-box;
+  border: 1px solid var(--surface2); border-radius: 2px;
+  pointer-events: auto; box-sizing: content-box;
+}
+/* Corner placement (centred on each corner: -6px = half the 12px dot, ignoring padding). */
+.region-handle[data-handle="nw"] { top: -6px; left: -6px; cursor: nwse-resize; }
+.region-handle[data-handle="ne"] { top: -6px; right: -6px; cursor: nesw-resize; }
+.region-handle[data-handle="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }
+.region-handle[data-handle="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }
+/* Edge midpoints (centred along each edge via 50% + translate). */
+.region-handle[data-handle="n"] { top: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.region-handle[data-handle="s"] { bottom: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.region-handle[data-handle="w"] { left: -6px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.region-handle[data-handle="e"] { right: -6px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+/* Handles belong to a committed overlay only — hide while drawing a new box or in select mode. */
+.region-rect.drawing .region-handle,
+.app.selecting .region-handle { display: none; }
 
 /* Region-draw mode armed: keep the crosshair explicit on the canvas. */
 .app.selecting .canvas-surface { cursor: crosshair; }

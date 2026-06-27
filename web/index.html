@@ -79,6 +79,17 @@
          handle re-enables pointer events on itself. Hidden until a region is drawn. -->
     <div class="region-rect" id="regionRect" style="display:none">
       <button class="region-clear" id="regionClear" type="button" title="Clear selected area" aria-label="Clear selected area">×</button>
+      <!-- Resize handles (T33): 4 corners + 4 edge midpoints. pointer-events re-enabled on each
+           (parent is none); app.js reads data-handle on mousedown to drive the edge being dragged.
+           Shown only on a committed overlay — hidden while drawing a new box / in selecting mode. -->
+      <span class="region-handle" data-handle="nw"></span>
+      <span class="region-handle" data-handle="n"></span>
+      <span class="region-handle" data-handle="ne"></span>
+      <span class="region-handle" data-handle="e"></span>
+      <span class="region-handle" data-handle="se"></span>
+      <span class="region-handle" data-handle="s"></span>
+      <span class="region-handle" data-handle="sw"></span>
+      <span class="region-handle" data-handle="w"></span>
     </div>
 
     <div class="canvas-hint">👆 Click image, then use the eyedropper to pick a colour</div>

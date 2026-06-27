@@ -6,11 +6,12 @@
 - **Browser GUI shell** (`web/index.html`, `web/styles.css`): two-panel dark-theme interface. Empty state: full-canvas dropzone. Loaded state: canvas draw surface. CSS-only state switching via `.app.loaded` / `.sidebar.disabled`.
   - Panel 1 (Target colour): eyedropper well, deltaE tolerance slider (0–100, default 12), Include shades toggle.
   - Panel 2 (Replace colour): recent-colour swatch row (up to 5, persisted to `localStorage`, most-recent-first; seeds white + black on first run), disabled Smart fill toggle (Soon).
-  - Footer: Reset + Export buttons.
+  - Footer: Undo + Reset + Export buttons.
 - **Interactive wiring** (`web/app.js`): file loading (drag-drop, click-to-browse, canvas-area swap, clipboard paste), on-canvas eyedropper with 9×9 pixel-zoom magnifier loupe, one-shot live preview on colour pick, Reset.
 - **Live tolerance re-scan**: dragging the tolerance slider re-runs the replacement in real time, coalesced to one render per `requestAnimationFrame`.
 - **Recent colours + palette opener** (Panel 2): swatch click sets replacement colour and re-runs preview; **+** opener adds a new colour via the native colour picker (move-to-front dedupe, cap 5, `localStorage` persistence with graceful fallback).
 - **Before / After comparison modal**: liquid-glass pill button (gated until a colour is picked) opens a full-viewport side-by-side modal. After panel captured via `canvas.toBlob()` + `URL.createObjectURL()`; blob URL revoked on close. Close via ×, Escape, or backdrop click.
+- **Undo history + multi-pass colour stacking** (footer): each colour pick now commits the previous result onto a base image instead of discarding it, so multiple different colours can be replaced and kept in one session. Added an undo button (and **Ctrl+Z** / **Cmd+Z**) that steps back one operation at a time — discarding the live preview first, then popping committed operations (capped at 10). Reset clears all history.
 - **Canvas API colour engine** (`web/recolour-engine.js`): pure-JS browser-side deltaE pixel scan — same CIE76/94/2000 formulas as the Node package, no Jimp dependency.
 
 ### Changed

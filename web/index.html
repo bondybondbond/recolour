@@ -131,7 +131,13 @@
     <!-- FOOTER — Reset + Export -->
     <div class="sidebar-section footer">
       <div class="footer-row">
+        <button class="btn btn-ghost" id="undoBtn" type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>
+          Undo
+        </button>
         <button class="btn btn-ghost" id="resetBtn">Reset</button>
+      </div>
+      <div class="footer-row">
         <button class="btn btn-primary" id="exportBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Export

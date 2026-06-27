@@ -112,6 +112,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 /* Footer — Reset + Export */
 .footer { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; }
 .footer-row { display: flex; gap: 8px; }
+.footer-row + .footer-row { margin-top: 8px; }
 .footer-row .btn { flex: 1; }
 
 /* Floating eyedropper magnifier (T23) — pixel-zoom loupe that follows the cursor.

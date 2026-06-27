@@ -32,6 +32,7 @@
   var recentGrid = document.getElementById('recentGrid')
   var paletteBtn = document.getElementById('paletteBtn')
   var resetBtn = document.getElementById('resetBtn')
+  var undoBtn = document.getElementById('undoBtn')
   var canvasArea = canvas.parentNode
 
   // Before/after modal (T24)
@@ -48,6 +49,17 @@
   var originalSrc = null       // original image as a data URL, for the modal "before"
   var targetRgb = null         // [r,g,b] of the last picked pixel, or null
   var picking = false          // is eyedropper armed?
+
+  // Undo / multi-pass history (T26). `baseImageData` is the committed starting point
+  // for the *current* operation — renderPreview() builds on THIS, not originalImageData,
+  // so each pick stacks on the previous result instead of discarding it. `undoStack`
+  // holds the previous bases (most-recent last), capped at MAX_UNDO.
+  // TRAP: never write baseImageData.data[i] in place — entries on undoStack share no
+  // copy-on-write protection, so an in-place write would silently corrupt a snapshot.
+  // Always reassign baseImageData (to a fresh ImageData / getImageData) instead.
+  var baseImageData = null
+  var undoStack = []
+  var MAX_UNDO = 10
 
   // Replace-colour history (T25). `recents` is the source of truth; localStorage is
   // a best-effort mirror. `selectedReplaceHex` is tracked in state (not read off the
@@ -113,6 +125,14 @@
     ctx.drawImage(img, 0, 0)
     originalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
 
+    // Fresh image -> the committed base is the original, history is empty (T26).
+    baseImageData = new ImageData(
+      new Uint8ClampedArray(originalImageData.data),
+      canvas.width,
+      canvas.height
+    )
+    undoStack = []
+
     // Flip to loaded state (T22 visual-state contract).
     app.classList.add('loaded')
     sidebar.classList.remove('disabled')
@@ -123,7 +143,7 @@
     targetRgb = null
     disarmPicker()
     resetPickerWell()
-    setBaEnabled(false) // no recolour yet on the new image
+    updateControls() // no recolour yet on the new image -> undo + before/after disabled
   }
 
   // Click-to-browse
@@ -292,18 +312,28 @@
     if (!picking || !originalImageData) return
     var p = eventToPixel(e)
     var rgba = pixelRgba(p.x, p.y)
+    commitOperation() // bake the previous live op (if any) so this pick stacks on top (T26)
     targetRgb = [rgba[0], rgba[1], rgba[2]]
     setPickedColour(rgbToHex(rgba[0], rgba[1], rgba[2]))
     disarmPicker()
     renderPreview()
-    setBaEnabled(true) // a recolour now exists -> before/after is meaningful
+    updateControls() // a recolour now exists -> undo + before/after meaningful
   })
 
-  // Esc closes the modal if open (takes priority), else cancels picker mode.
+  // Keyboard: Esc closes the modal (priority) else cancels picker mode; Ctrl/Cmd+Z undoes.
   document.addEventListener('keydown', function (e) {
-    if (e.key !== 'Escape') return
-    if (modal.classList.contains('open')) closeModal()
-    else if (picking) disarmPicker()
+    if (e.key === 'Escape') {
+      if (modal.classList.contains('open')) closeModal()
+      else if (picking) disarmPicker()
+      return
+    }
+    // Undo (T26). Guard on image-loaded (originalImageData), NOT undoStack length, so
+    // Ctrl+Z with no image is a clean no-op. Shift+Ctrl+Z is left for a future redo.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      if (!originalImageData) return
+      e.preventDefault()
+      undo()
+    }
   })
 
   // ---------------------------------------------------------------------------
@@ -427,17 +457,59 @@
   }
 
   function renderPreview () {
-    if (!originalImageData || !targetRgb) return
+    if (!baseImageData || !targetRgb) return
     var replaceRgb = selectedReplaceRgb()
     var tol = parseInt(tolerance.value, 10)
-    // Always start from a fresh copy — the engine mutates in place.
+    // Start from a fresh copy of the committed base (NOT the original) so this op
+    // stacks on top of prior committed ops (T26). The engine mutates in place; the
+    // copy keeps baseImageData / undoStack snapshots pristine.
     var work = new ImageData(
-      new Uint8ClampedArray(originalImageData.data),
+      new Uint8ClampedArray(baseImageData.data),
       canvas.width,
       canvas.height
     )
     Engine.replaceColour(work, targetRgb, replaceRgb, tol)
     ctx.putImageData(work, 0, 0)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Undo / multi-pass history (T26)
+  // ---------------------------------------------------------------------------
+  // Bake the current live preview into the committed base, pushing the old base onto
+  // the undo stack. No-op when no colour is picked (nothing live to commit).
+  function commitOperation () {
+    if (!targetRgb) return
+    undoStack.push(baseImageData)
+    if (undoStack.length > MAX_UNDO) undoStack.shift() // push first, then drop oldest
+    // The live preview is already painted on the canvas -> snapshot it as the new base.
+    baseImageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  }
+
+  // Step back one change. Two cases: a live (uncommitted) op is discarded first;
+  // otherwise the last committed base is popped. Never drains the stack on a live op.
+  function undo () {
+    if (!originalImageData) return
+    cancelScheduledPreview() // drop any frame queued from a mid-drag slider move
+    if (targetRgb) {
+      // Discard the live, uncommitted op -> repaint the committed base.
+      targetRgb = null
+      ctx.putImageData(baseImageData, 0, 0)
+      disarmPicker()
+      resetPickerWell()
+    } else if (undoStack.length) {
+      baseImageData = undoStack.pop()
+      ctx.putImageData(baseImageData, 0, 0)
+    }
+    updateControls()
+  }
+
+  // Single source of truth for the controls gated on "are there edits to undo / compare".
+  // When undoStack is empty and no op is live, baseImageData === original, so both the
+  // undo button and the before/after trigger are correctly disabled.
+  function updateControls () {
+    var hasEdits = targetRgb !== null || undoStack.length > 0
+    undoBtn.disabled = !hasEdits
+    baBtn.disabled = !hasEdits
   }
 
   // Live re-scan throttle (T18). Each renderPreview() copies the full image and
@@ -467,11 +539,20 @@
     if (!originalImageData) return
     cancelScheduledPreview() // drop any frame queued from a mid-drag slider move
     ctx.putImageData(originalImageData, 0, 0)
+    // Nuke all history AND any live op (T26) — Reset returns fully to the original.
+    baseImageData = new ImageData(
+      new Uint8ClampedArray(originalImageData.data),
+      canvas.width,
+      canvas.height
+    )
+    undoStack = []
     targetRgb = null
     disarmPicker()
     resetPickerWell()
-    setBaEnabled(false) // back to the original -> nothing to compare
+    updateControls() // back to the original -> undo + before/after disabled
   })
+
+  undoBtn.addEventListener('click', undo)
 
   // Keep the value label in sync and live re-scan as the slider drags (T18).
   // schedulePreview() no-ops until a colour is picked (renderPreview guard).
@@ -483,12 +564,8 @@
   // ---------------------------------------------------------------------------
   // Before/after modal (T24)
   // ---------------------------------------------------------------------------
-  // The trigger is disabled until a colour is picked (gated here), so the modal
-  // never opens with two identical images.
-  function setBaEnabled (on) {
-    baBtn.disabled = !on
-  }
-
+  // The trigger is disabled until a colour is picked (gated by updateControls() via
+  // hasEdits), so the modal never opens with two identical images.
   function openModal () {
     if (!originalImageData) return
     baBefore.src = originalSrc

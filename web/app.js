@@ -33,6 +33,10 @@
   var recentRow = recentGrid.parentNode // .recent-row wraps the grid + "+" opener
   var paletteBtn = document.getElementById('paletteBtn')
   var smartFillToggle = document.getElementById('smartFill')
+  var includeShadeToggle = document.getElementById('includeShades')
+  var shadeLabel = document.getElementById('shadeLabel')
+  var shadeSub = document.getElementById('shadeSub')
+  var sliderRow = tolerance.parentNode // .slider-row wraps the meta labels + input
   var resetBtn = document.getElementById('resetBtn')
   var undoBtn = document.getElementById('undoBtn')
   var canvasArea = canvas.parentNode
@@ -75,6 +79,10 @@
   var MAX_RECENT = 5
   var recents = []             // array of uppercase #RRGGBB, most-recent-first
   var selectedReplaceHex = '#FFFFFF'
+
+  // Include shades gate. When off, tolerance is forced to 0 — exact hex match only.
+  // When on, the tolerance slider is active and the engine uses the slider value.
+  var includeShades = true
 
   // Smart fill (T16). When on, renderPreview() uses Engine.smartFill() — cardinal
   // distance-weighted interpolation — instead of the flat selected replace colour.
@@ -680,6 +688,23 @@
   selectedReplaceHex = recents[0] || '#FFFFFF'
   renderRecents()
 
+  // Include shades toggle. OFF = exact hex match (tolerance forced to 0, slider muted).
+  // ON = slider active, tolerance applied normally. renderPreview() no-ops pre-pick.
+  function setIncludeShades (on) {
+    includeShades = on
+    includeShadeToggle.classList.toggle('on', on)
+    includeShadeToggle.setAttribute('aria-checked', on ? 'true' : 'false')
+    sliderRow.classList.toggle('muted', !on) // dim + disable slider when exact-match mode
+    shadeLabel.textContent = on ? 'Match shades' : 'Exact match'
+    shadeSub.textContent = on ? 'Match gradient & anti-aliased variants' : 'Matches only this hex — ignores tolerance'
+    renderPreview()
+  }
+  includeShadeToggle.addEventListener('click', function () { setIncludeShades(!includeShades) })
+  includeShadeToggle.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setIncludeShades(!includeShades) }
+  })
+  setIncludeShades(true) // initialise to ON (match shades, slider active)
+
   // Smart fill toggle (T16). Flip state, reflect it on the switch + ARIA, dim the now-unused
   // replace-colour swatches, and live-update the canvas. renderPreview() no-ops until a
   // target colour is picked (its own guard), so toggling pre-pick is a safe no-op.
@@ -708,7 +733,7 @@
 
   function renderPreview () {
     if (!baseImageData || !targetRgb) return
-    var tol = parseInt(tolerance.value, 10)
+    var tol = includeShades ? parseInt(tolerance.value, 10) : 0
     // Start from a fresh copy of the committed base (NOT the original) so this op
     // stacks on top of prior committed ops (T26). The engine mutates in place; the
     // copy keeps baseImageData / undoStack snapshots pristine.

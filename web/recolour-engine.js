@@ -98,5 +98,123 @@
     return { imageData: imageData, matched: matched }
   }
 
-  return { rgbToLab: rgbToLab, deltaE76: deltaE76, replaceColour: replaceColour }
+  /*
+   * Smart fill — cardinal distance-weighted inpainting (T16, issue #16).
+   *
+   * For each pixel matching the target colour, scan outward in 4 cardinal directions (L/R/U/D)
+   * to the nearest ORIGINAL background pixel, then blend the 4 boundary colours weighted by
+   * inverse distance (1/d). Because every target pixel reaches the original background directly
+   * — with no intermediate filled pixels in the chain — there are no competing propagation
+   * fronts and no chevron seam. Works in a single pass after an O(WH) pre-computation step.
+   *
+   * Why not onion-peel? Onion-peel fills from the outside in, so interior pixels inherit values
+   * from previously-filled pixels (not the original background). On a gradient, the left-fill
+   * front and the right-fill front propagate inward and collide at a visible seam regardless of
+   * whether you use mode or mean aggregation. Cardinal interpolation bypasses that entirely.
+   *
+   * CONCAVE MASK CAVEAT: cardinal scans assume the nearest boundary in each direction is a
+   * meaningful source. On concave masks (e.g. a watermark with a hole), a scan may exit the
+   * target region, cross a gap of background, and hit the far boundary — pulling a distant
+   * colour. For MVP rectangular/text watermarks this is rarely an issue. BFS distance-weighted
+   * fill (Option 4) handles concave shapes better and is the documented next rung.
+   *
+   * FRINGE/HALO CAVEAT: if `tolerance` is too low the mask leaves a 1px semi-target fringe
+   * unmasked; smart fill doesn't touch it → a faint halo. Fix: raise tolerance.
+   *
+   * @param {ImageData|{data,width,height}} imageData  RGBA buffer. Mutated IN PLACE.
+   * @param {number[]} targetRgb   colour to remove, [r,g,b] (0-255).
+   * @param {number} tolerance     Delta-E threshold (0-100). <= matches (same as replaceColour).
+   * @param {object} [options]     Accepted for API compatibility; unused by this algorithm.
+   * @returns {{imageData: ImageData, matched: number, unfilled: number}}
+   *        unfilled > 0 only when a target pixel has no non-target pixel in any direction
+   *        (e.g. an all-target image with no background to sample).
+   */
+  function smartFill (imageData, targetRgb, tolerance, options) { // eslint-disable-line no-unused-vars
+    var data = imageData.data
+    var width = imageData.width
+    var height = imageData.height
+    var n = width * height
+    var targetLab = rgbToLab(targetRgb)
+
+    // 1. Build the match mask — one O(WH) LAB pass, same as replaceColour.
+    var mask = new Uint8Array(n)
+    var matched = 0
+    for (var p = 0; p < n; p++) {
+      var o = p * 4
+      if (deltaE76(rgbToLab([data[o], data[o + 1], data[o + 2]]), targetLab) <= tolerance) {
+        mask[p] = 1
+        matched++
+      }
+    }
+
+    // 2. Pre-compute the nearest original non-target pixel index and its distance in each of
+    //    the 4 cardinal directions. Two linear passes per row (L→R, R→L) + two per column
+    //    (T→B, B→T) = O(WH) total. Sentinel: idx = -1 means no boundary in that direction.
+    var lIdx = new Int32Array(n).fill(-1), lDst = new Uint16Array(n)
+    var rIdx = new Int32Array(n).fill(-1), rDst = new Uint16Array(n)
+    var uIdx = new Int32Array(n).fill(-1), uDst = new Uint16Array(n)
+    var dIdx = new Int32Array(n).fill(-1), dDst = new Uint16Array(n)
+    var lastP, lastX, lastY, x, y
+
+    for (y = 0; y < height; y++) {
+      lastP = -1; lastX = 0
+      for (x = 0; x < width; x++) {
+        p = y * width + x
+        if (!mask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { lIdx[p] = lastP; lDst[p] = x - lastX }
+      }
+      lastP = -1; lastX = 0
+      for (x = width - 1; x >= 0; x--) {
+        p = y * width + x
+        if (!mask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { rIdx[p] = lastP; rDst[p] = lastX - x }
+      }
+    }
+    for (x = 0; x < width; x++) {
+      lastP = -1; lastY = 0
+      for (y = 0; y < height; y++) {
+        p = y * width + x
+        if (!mask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { uIdx[p] = lastP; uDst[p] = y - lastY }
+      }
+      lastP = -1; lastY = 0
+      for (y = height - 1; y >= 0; y--) {
+        p = y * width + x
+        if (!mask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { dIdx[p] = lastP; dDst[p] = lastY - y }
+      }
+    }
+
+    // 3. Single-pass inverse-distance-weighted fill. Each target pixel samples the 4 boundary
+    //    colours from original non-target pixels directly — no propagation chain, no fronts.
+    //    Safe to write in-place: lIdx/rIdx/uIdx/dIdx always point to mask=0 pixels which are
+    //    never written, so read/write sets are disjoint (no deferred-write buffer needed).
+    var timing = typeof window !== 'undefined'
+    if (timing) console.time('smartFill')
+    var unfilled = 0
+    var rS, gS, bS, wS, w, idx
+
+    for (p = 0; p < n; p++) {
+      if (!mask[p]) continue
+      rS = 0; gS = 0; bS = 0; wS = 0
+
+      idx = lIdx[p]; if (idx >= 0) { w = 1 / lDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+      idx = rIdx[p]; if (idx >= 0) { w = 1 / rDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+      idx = uIdx[p]; if (idx >= 0) { w = 1 / uDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+      idx = dIdx[p]; if (idx >= 0) { w = 1 / dDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
+
+      if (wS === 0) { unfilled++; continue }
+      o = p * 4
+      data[o]     = Math.round(rS / wS)
+      data[o + 1] = Math.round(gS / wS)
+      data[o + 2] = Math.round(bS / wS)
+      // alpha preserved (not written) — mirrors replaceColour's 3-element behaviour
+    }
+    if (timing) console.timeEnd('smartFill')
+
+    return { imageData: imageData, matched: matched, unfilled: unfilled }
+  }
+
+  return {
+    rgbToLab: rgbToLab,
+    deltaE76: deltaE76,
+    replaceColour: replaceColour,
+    smartFill: smartFill
+  }
 })

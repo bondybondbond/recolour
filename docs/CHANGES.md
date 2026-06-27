@@ -5,7 +5,7 @@
 ### Added
 - **Browser GUI shell** (`web/index.html`, `web/styles.css`): two-panel dark-theme interface. Empty state: full-canvas dropzone. Loaded state: canvas draw surface. CSS-only state switching via `.app.loaded` / `.sidebar.disabled`.
   - Panel 1 (Target colour): eyedropper well, deltaE tolerance slider (0–100, default 12), Include shades toggle.
-  - Panel 2 (Replace colour): recent-colour swatch row (up to 5, persisted to `localStorage`, most-recent-first; seeds white + black on first run), disabled Smart fill toggle (Soon).
+  - Panel 2 (Replace colour): recent-colour swatch row (up to 5, persisted to `localStorage`, most-recent-first; seeds white + black on first run), Smart fill toggle.
   - Footer: Undo + Reset + Export buttons.
 - **Interactive wiring** (`web/app.js`): file loading (drag-drop, click-to-browse, canvas-area swap, clipboard paste), on-canvas eyedropper with 9×9 pixel-zoom magnifier loupe, one-shot live preview on colour pick, Reset.
 - **Live tolerance re-scan**: dragging the tolerance slider re-runs the replacement in real time, coalesced to one render per `requestAnimationFrame`.
@@ -13,6 +13,10 @@
 - **Before / After comparison modal**: liquid-glass pill button (gated until a colour is picked) opens a full-viewport side-by-side modal. After panel captured via `canvas.toBlob()` + `URL.createObjectURL()`; blob URL revoked on close. Close via ×, Escape, or backdrop click.
 - **Undo history + multi-pass colour stacking** (footer): each colour pick now commits the previous result onto a base image instead of discarding it, so multiple different colours can be replaced and kept in one session. Added an undo button (and **Ctrl+Z** / **Cmd+Z**) that steps back one operation at a time — discarding the live preview first, then popping committed operations (capped at 10). Reset clears all history.
 - **Canvas API colour engine** (`web/recolour-engine.js`): pure-JS browser-side deltaE pixel scan — same CIE76/94/2000 formulas as the Node package, no Jimp dependency.
+- **Smart fill** (`web/recolour-engine.js` `smartFill()`, Panel 2 toggle): replaces matched pixels by sampling the nearest original background pixel in each of 4 cardinal directions and blending with inverse-distance weights — no flat replacement colour required. Enables watermark removal on non-flat backgrounds without knowing the background colour in advance. Algorithm: single-pass cardinal distance-weighted interpolation (not onion-peel); avoids competing propagation fronts that produce chevron seams on gradient backgrounds.
+
+### Fixed
+- **Eyedropper samples current image state** (`web/app.js`): after committing an operation (e.g. smart fill), the loupe and pick now read from the committed canvas state (`baseImageData`) rather than always sampling the original image. Re-picking a previously filled area correctly reflects the filled colours.
 
 ### Changed
 - Default tolerance lowered from 35 to 12.

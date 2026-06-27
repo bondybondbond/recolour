@@ -30,7 +30,9 @@
   var tolerance = document.getElementById('tolerance')
   var tolVal = document.getElementById('tolVal')
   var recentGrid = document.getElementById('recentGrid')
+  var recentRow = recentGrid.parentNode // .recent-row wraps the grid + "+" opener
   var paletteBtn = document.getElementById('paletteBtn')
+  var smartFillToggle = document.getElementById('smartFill')
   var resetBtn = document.getElementById('resetBtn')
   var undoBtn = document.getElementById('undoBtn')
   var canvasArea = canvas.parentNode
@@ -68,6 +70,13 @@
   var MAX_RECENT = 5
   var recents = []             // array of uppercase #RRGGBB, most-recent-first
   var selectedReplaceHex = '#FFFFFF'
+
+  // Smart fill (T16). When on, renderPreview() uses Engine.smartFill() — cardinal
+  // distance-weighted interpolation — instead of the flat selected replace colour.
+  // Each matched pixel is reconstructed from the nearest original background pixel in
+  // each of the 4 cardinal directions, weighted by 1/distance. The Panel 2 swatches are
+  // dimmed + disabled while it's active because the flat colour is not used.
+  var smartFillOn = false
 
   // Floating magnifier (created lazily on first load).
   var MAG_RADIUS = 4           // 4 px each side of centre -> 9x9 grid
@@ -229,8 +238,12 @@
     return { x: x, y: y }
   }
 
+  // Read a pixel from the COMMITTED state (baseImageData), not the original. This ensures
+  // the eyedropper samples what is currently on the canvas after prior edits — e.g. after
+  // smart-filling a watermark, hovering/clicking that area reflects the filled colours, not
+  // the original red. Called after commitOperation() so baseImageData is already up-to-date.
   function pixelRgba (x, y) {
-    var d = originalImageData.data
+    var d = baseImageData.data
     var i = (y * canvas.width + x) * 4
     return [d[i], d[i + 1], d[i + 2], d[i + 3]]
   }
@@ -239,7 +252,7 @@
   // with a pixel grid and crosshair on the centre cell.
   function drawMagnifier (e, cx, cy) {
     magCtx.clearRect(0, 0, MAG_PX, MAG_PX)
-    var d = originalImageData.data
+    var d = baseImageData.data // committed state — shows filled colours, not the original
     var w = canvas.width
     var h = canvas.height
     var size = MAG_RADIUS * 2 + 1
@@ -311,8 +324,10 @@
   canvas.addEventListener('click', function (e) {
     if (!picking || !originalImageData) return
     var p = eventToPixel(e)
-    var rgba = pixelRgba(p.x, p.y)
+    // Commit FIRST so baseImageData reflects the current canvas (including any live preview)
+    // before pixelRgba reads from it. Order matters: pixelRgba reads baseImageData.
     commitOperation() // bake the previous live op (if any) so this pick stacks on top (T26)
+    var rgba = pixelRgba(p.x, p.y)
     targetRgb = [rgba[0], rgba[1], rgba[2]]
     setPickedColour(rgbToHex(rgba[0], rgba[1], rgba[2]))
     disarmPicker()
@@ -449,6 +464,25 @@
   selectedReplaceHex = recents[0] || '#FFFFFF'
   renderRecents()
 
+  // Smart fill toggle (T16). Flip state, reflect it on the switch + ARIA, dim the now-unused
+  // replace-colour swatches, and live-update the canvas. renderPreview() no-ops until a
+  // target colour is picked (its own guard), so toggling pre-pick is a safe no-op.
+  function setSmartFill (on) {
+    smartFillOn = on
+    smartFillToggle.classList.toggle('on', on)
+    smartFillToggle.setAttribute('aria-checked', on ? 'true' : 'false')
+    recentRow.classList.toggle('muted', on) // CSS dims + blocks pointer events
+    renderPreview()
+  }
+  smartFillToggle.addEventListener('click', function () { setSmartFill(!smartFillOn) })
+  // Keyboard parity for the role=switch (Space/Enter), since it's a div, not a button.
+  smartFillToggle.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault()
+      setSmartFill(!smartFillOn)
+    }
+  })
+
   // ---------------------------------------------------------------------------
   // Preview (one-shot, on pick) + reset
   // ---------------------------------------------------------------------------
@@ -458,7 +492,6 @@
 
   function renderPreview () {
     if (!baseImageData || !targetRgb) return
-    var replaceRgb = selectedReplaceRgb()
     var tol = parseInt(tolerance.value, 10)
     // Start from a fresh copy of the committed base (NOT the original) so this op
     // stacks on top of prior committed ops (T26). The engine mutates in place; the
@@ -468,7 +501,10 @@
       canvas.width,
       canvas.height
     )
-    Engine.replaceColour(work, targetRgb, replaceRgb, tol)
+    // Smart fill (T16) reconstructs matched pixels from their neighbours and ignores the
+    // selected replace colour; the flat path overwrites them with it.
+    if (smartFillOn) Engine.smartFill(work, targetRgb, tol)
+    else Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol)
     ctx.putImageData(work, 0, 0)
   }
 

@@ -18,6 +18,32 @@ function makeImage (pixels) {
   return { data: data, width: pixels.length, height: 1 }
 }
 
+// 2D variant for smartFill — a 1-row strip can't exercise the interior-fill cases that
+// are the whole point of the feature. `rows` is an array of rows, each an array of
+// [r,g,b] or [r,g,b,a] pixels. Returns { data, width, height }.
+function makeGrid (rows) {
+  const height = rows.length
+  const width = rows[0].length
+  const data = new Uint8ClampedArray(width * height * 4)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = rows[y][x]
+      const o = (y * width + x) * 4
+      data[o] = p[0]
+      data[o + 1] = p[1]
+      data[o + 2] = p[2]
+      data[o + 3] = p.length > 3 ? p[3] : 255
+    }
+  }
+  return { data: data, width: width, height: height }
+}
+
+// Read a pixel's RGBA out of a {data,width} buffer.
+function pixelAt (img, x, y) {
+  const o = (y * img.width + x) * 4
+  return [img.data[o], img.data[o + 1], img.data[o + 2], img.data[o + 3]]
+}
+
 describe('recolour engine', function () {
   describe('rgbToLab — parity with color-convert', function () {
     // Use color-convert's .raw path (the default API rounds to integers, which
@@ -99,6 +125,86 @@ describe('recolour engine', function () {
       const img = makeImage([[200, 0, 0, 128]])
       engine.replaceColour(img, [200, 0, 0], [0, 0, 255, 64], 1)
       assert.deepStrictEqual([img.data[0], img.data[1], img.data[2], img.data[3]], [0, 0, 255, 64])
+    })
+  })
+
+  describe('smartFill', function () {
+    const T = [200, 0, 0] // target (red) to remove
+    const A = [0, 100, 0] // dominant neighbour (green)
+    const B = [0, 0, 100] // secondary neighbour (blue)
+
+    it('fills a lone target pixel with its surrounding colour', () => {
+      const img = makeGrid([
+        [A, A, A],
+        [A, T, A],
+        [A, A, A]
+      ])
+      const { matched, unfilled } = engine.smartFill(img, T, 10)
+      assert.strictEqual(matched, 1)
+      assert.strictEqual(unfilled, 0)
+      assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), A)
+    })
+
+    it('fully fills a thick block including the hollow centre (no unfilled pixels)', () => {
+      // 5x5: outer ring = A, inner 3x3 = target. The centre pixel is 2px from every boundary.
+      // Cardinal interpolation reaches the original A boundary directly in all 4 directions.
+      const img = makeGrid([
+        [A, A, A, A, A],
+        [A, T, T, T, A],
+        [A, T, T, T, A],
+        [A, T, T, T, A],
+        [A, A, A, A, A]
+      ])
+      const { matched, unfilled } = engine.smartFill(img, T, 10)
+      assert.strictEqual(matched, 9)
+      assert.strictEqual(unfilled, 0)
+      assert.deepStrictEqual(pixelAt(img, 2, 2).slice(0, 3), A) // dead-centre reconstructed
+    })
+
+    it('averages neighbours, producing a blend on a gradient (not a discrete winner)', () => {
+      // A (green) to the left, B (blue) to the right, equal count — average should be
+      // midpoint [0,50,50], not A or B. This is the key gradient-artifact fix: mode
+      // would hard-pick one side, producing a visible seam; average blends smoothly.
+      const img = makeGrid([
+        [A, A, A],
+        [A, T, B],
+        [A, A, B]
+      ])
+      // 5 A neighbours + 2 B neighbours → mean = round((5*A + 2*B) / 7 per channel)
+      // A=[0,100,0] B=[0,0,100]: r=0, g=round(500/7)=71, b=round(200/7)=29
+      engine.smartFill(img, T, 10)
+      const px = pixelAt(img, 1, 1).slice(0, 3)
+      assert.ok(px[0] === 0, 'r should be 0')
+      assert.ok(px[1] > 0 && px[1] < 100, `g should be a blend, got ${px[1]}`)
+      assert.ok(px[2] > 0 && px[2] < 100, `b should be a blend, got ${px[2]}`)
+    })
+
+    it('preserves the original alpha of a filled pixel', () => {
+      const img = makeGrid([
+        [A, A, A],
+        [A, [200, 0, 0, 128], A],
+        [A, A, A]
+      ])
+      engine.smartFill(img, T, 10)
+      assert.deepStrictEqual(pixelAt(img, 1, 1), [A[0], A[1], A[2], 128])
+    })
+
+    it('leaves pixels unfilled when there is no non-target pixel in any direction', () => {
+      // All-target image: every cardinal scan hits only target pixels or the image edge,
+      // so wS=0 and all pixels go to unfilled. No hang (single-pass, no iteration cap needed).
+      const img = makeGrid([
+        [T, T],
+        [T, T]
+      ])
+      const { matched, unfilled } = engine.smartFill(img, T, 10)
+      assert.strictEqual(matched, 4)
+      assert.strictEqual(unfilled, 4)
+    })
+
+    it('mutates in place and returns the same buffer', () => {
+      const img = makeGrid([[A, T, A]])
+      const result = engine.smartFill(img, T, 10)
+      assert.strictEqual(result.imageData, img)
     })
   })
 })

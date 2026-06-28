@@ -929,8 +929,9 @@
     )
     // Smart fill (T16) reconstructs matched pixels from their neighbours and ignores the
     // selected replace colour; the flat path overwrites them with it. `region` (T17) is null
-    // for whole-image and constrains both paths to the drawn box when set.
-    if (smartFillOn) Engine.smartFill(work, targetRgb, tol, undefined, region)
+    // for whole-image and constrains both paths to the drawn box when set. `dilate: 1` (T30)
+    // expands the mask 1px so anti-aliased watermark edges are reconstructed, not left as a halo.
+    if (smartFillOn) Engine.smartFill(work, targetRgb, tol, { dilate: 1 }, region)
     else Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol, region)
     ctx.putImageData(work, 0, 0)
     livePreviewImageData = work // loupe reads this so it shows the in-progress result

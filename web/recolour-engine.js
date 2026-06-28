@@ -143,13 +143,18 @@
    * colour. For MVP rectangular/text watermarks this is rarely an issue. BFS distance-weighted
    * fill (Option 4) handles concave shapes better and is the documented next rung.
    *
-   * FRINGE/HALO CAVEAT: if `tolerance` is too low the mask leaves a 1px semi-target fringe
-   * unmasked; smart fill doesn't touch it → a faint halo. Fix: raise tolerance.
+   * FRINGE/HALO CAVEAT: anti-aliased letter edges blend into the background and fall just
+   * outside the exact-colour match, so the fill leaves them as a faint halo. Pass
+   * `options.dilate` (px) to expand the mask before filling and reconstruct that fringe instead
+   * of raising tolerance (which risks eating real background). The GUI passes `dilate: 1` (T30);
+   * the engine default is 0 (legacy behaviour). Raising tolerance is still an alternative.
    *
    * @param {ImageData|{data,width,height}} imageData  RGBA buffer. Mutated IN PLACE.
    * @param {number[]} targetRgb   colour to remove, [r,g,b] (0-255).
    * @param {number} tolerance     Delta-E threshold (0-100). <= matches (same as replaceColour).
-   * @param {object} [options]     Accepted for API compatibility; unused by this algorithm.
+   * @param {object} [options]     `options.dilate` (number, default 0) — expand the match mask by
+   *        this many px before filling so anti-aliased edge pixels are reconstructed rather than
+   *        left as a halo (T30). 0 reproduces the legacy fill exactly.
    * @param {object} [region]      Optional {x,y,width,height} in image pixel coords. When
    *        supplied, only pixels inside the rectangle are masked + filled (T17). The region
    *        edge then acts as a natural boundary: a matched pixel with no in-region non-target
@@ -159,7 +164,7 @@
    *        unfilled > 0 only when a target pixel has no non-target pixel in any direction
    *        (e.g. an all-target image with no background to sample).
    */
-  function smartFill (imageData, targetRgb, tolerance, options, region) { // eslint-disable-line no-unused-vars
+  function smartFill (imageData, targetRgb, tolerance, options, region) {
     var data = imageData.data
     var width = imageData.width
     var height = imageData.height
@@ -167,6 +172,7 @@
     var targetLab = rgbToLab(targetRgb)
     var b = clampRegion(region, width, height) // half-open bounds; whole image when no region
     var p, o, x, y
+    var nx, ny, nx0, nx1, ny0, ny1, found // dilation neighbour-scan locals (T30)
 
     // 1. Build the match mask — one LAB pass over the region (whole image when unbounded),
     //    same matching rule as replaceColour.
@@ -183,6 +189,37 @@
       }
     }
 
+    // 1b. Mask dilation (T30). Anti-aliased letter edges blend into the background and fall
+    //     just outside the exact-colour match, so the cardinal fill leaves them as a ghost halo.
+    //     Expanding the mask by `dilate` px (default 0 = legacy behaviour) pulls those fringe
+    //     pixels into the fill set: they become fill TARGETS and are excluded as background
+    //     SOURCES, so they get reconstructed instead of surviving as a halo. `matched` is left
+    //     reporting the ORIGINAL exact-match count — dilated pixels do not inflate it.
+    //     CRITICAL: read from `mask`, write to a separate `fillMask`, so a freshly-dilated pixel
+    //     cannot seed further growth in the same pass (that would silently bleed past `dilate` px).
+    var dilate = (options && options.dilate) | 0
+    var fillMask = mask
+    if (dilate > 0) {
+      fillMask = new Uint8Array(n)
+      for (y = b.y0; y < b.y1; y++) {
+        for (x = b.x0; x < b.x1; x++) {
+          p = y * width + x
+          if (mask[p]) { fillMask[p] = 1; continue }
+          // Mark a fill target if any ORIGINAL mask pixel lies within Chebyshev radius `dilate`,
+          // clamped to the region bounds (so dilation never reaches outside the region/image).
+          ny0 = Math.max(b.y0, y - dilate); ny1 = Math.min(b.y1 - 1, y + dilate)
+          nx0 = Math.max(b.x0, x - dilate); nx1 = Math.min(b.x1 - 1, x + dilate)
+          found = false
+          for (ny = ny0; ny <= ny1 && !found; ny++) {
+            for (nx = nx0; nx <= nx1; nx++) {
+              if (mask[ny * width + nx]) { found = true; break }
+            }
+          }
+          if (found) fillMask[p] = 1
+        }
+      }
+    }
+
     // 2. Pre-compute the nearest original non-target pixel index and its distance in each of
     //    the 4 cardinal directions, scanning only within the region bounds. Two linear passes
     //    per row (L→R, R→L) + two per column (T→B, B→T). Sentinel: idx = -1 means no boundary
@@ -193,34 +230,36 @@
     var dIdx = new Int32Array(n).fill(-1), dDst = new Uint16Array(n)
     var lastP, lastX, lastY
 
+    // Boundary sources are pixels NOT in fillMask — i.e. original background, excluding any
+    // dilated fringe (which is contaminated with target colour and must not be sampled).
     for (y = b.y0; y < b.y1; y++) {
       lastP = -1; lastX = 0
       for (x = b.x0; x < b.x1; x++) {
         p = y * width + x
-        if (!mask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { lIdx[p] = lastP; lDst[p] = x - lastX }
+        if (!fillMask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { lIdx[p] = lastP; lDst[p] = x - lastX }
       }
       lastP = -1; lastX = 0
       for (x = b.x1 - 1; x >= b.x0; x--) {
         p = y * width + x
-        if (!mask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { rIdx[p] = lastP; rDst[p] = lastX - x }
+        if (!fillMask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { rIdx[p] = lastP; rDst[p] = lastX - x }
       }
     }
     for (x = b.x0; x < b.x1; x++) {
       lastP = -1; lastY = 0
       for (y = b.y0; y < b.y1; y++) {
         p = y * width + x
-        if (!mask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { uIdx[p] = lastP; uDst[p] = y - lastY }
+        if (!fillMask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { uIdx[p] = lastP; uDst[p] = y - lastY }
       }
       lastP = -1; lastY = 0
       for (y = b.y1 - 1; y >= b.y0; y--) {
         p = y * width + x
-        if (!mask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { dIdx[p] = lastP; dDst[p] = lastY - y }
+        if (!fillMask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { dIdx[p] = lastP; dDst[p] = lastY - y }
       }
     }
 
     // 3. Single-pass inverse-distance-weighted fill. Each target pixel samples the 4 boundary
     //    colours from original non-target pixels directly — no propagation chain, no fronts.
-    //    Safe to write in-place: lIdx/rIdx/uIdx/dIdx always point to mask=0 pixels which are
+    //    Safe to write in-place: lIdx/rIdx/uIdx/dIdx always point to fillMask=0 pixels which are
     //    never written, so read/write sets are disjoint (no deferred-write buffer needed).
     var timing = typeof window !== 'undefined'
     if (timing) console.time('smartFill')
@@ -230,7 +269,7 @@
     for (y = b.y0; y < b.y1; y++) {
       for (x = b.x0; x < b.x1; x++) {
         p = y * width + x
-        if (!mask[p]) continue
+        if (!fillMask[p]) continue
         rS = 0; gS = 0; bS = 0; wS = 0
 
         idx = lIdx[p]; if (idx >= 0) { w = 1 / lDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }

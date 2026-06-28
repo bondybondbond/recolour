@@ -208,6 +208,82 @@ describe('recolour engine', function () {
     })
   })
 
+  // Mask dilation (T30): options.dilate expands the match mask by N px before filling so
+  // anti-aliased edge pixels (a near-target fringe just outside the colour match) are
+  // reconstructed from the true background instead of surviving as a halo. Default 0 = legacy.
+  describe('smartFill dilation (T30)', function () {
+    const T = [200, 0, 0]   // target (red) — the only colour that matches at tol 10
+    const B = [0, 0, 100]   // anti-aliased FRINGE ring (Chebyshev-1 from target); not matched
+    const C = [100, 0, 100] // TRUE background just outside the fringe (Chebyshev-2)
+    const A = [0, 100, 0]   // FAR background (Chebyshev >= 3)
+
+    // 7x7 with the target at centre (3,3), wrapped by a 1px B fringe, then a C ring, then A.
+    // d = Chebyshev distance from (3,3): 0->T, 1->B, 2->C, >=3->A.
+    function layered () {
+      return makeGrid([
+        [A, A, A, A, A, A, A],
+        [A, C, C, C, C, C, A],
+        [A, C, B, B, B, C, A],
+        [A, C, B, T, B, C, A],
+        [A, C, B, B, B, C, A],
+        [A, C, C, C, C, C, A],
+        [A, A, A, A, A, A, A]
+      ])
+    }
+
+    it('without dilation, the fringe survives: centre is filled from the immediate B ring (the halo)', () => {
+      const img = layered()
+      const { matched, unfilled } = engine.smartFill(img, T, 10) // dilate defaults to 0
+      assert.strictEqual(matched, 1)
+      assert.strictEqual(unfilled, 0)
+      assert.deepStrictEqual(pixelAt(img, 3, 3).slice(0, 3), B) // halo: centre took the fringe colour
+      assert.deepStrictEqual(pixelAt(img, 3, 2).slice(0, 3), B) // fringe ring left untouched
+    })
+
+    it('with dilate:1 the fringe is reconstructed and the centre samples past it (halo gone)', () => {
+      const img = layered()
+      const { matched, unfilled } = engine.smartFill(img, T, 10, { dilate: 1 })
+      assert.strictEqual(matched, 1)   // matched counts ONLY the exact-colour match, not dilated px
+      assert.strictEqual(unfilled, 0)
+      assert.deepStrictEqual(pixelAt(img, 3, 3).slice(0, 3), C) // centre now samples the true bg, not B
+      assert.deepStrictEqual(pixelAt(img, 3, 2).slice(0, 3), C) // a B fringe pixel was reconstructed (was B)
+    })
+
+    it('dilate:1 grows by EXACTLY 1px — the Chebyshev-2 ring is never touched (no 2px bleed)', () => {
+      // If the dilation pass read & wrote the same buffer, freshly-dilated pixels would seed
+      // further growth and the C ring would become fill targets (reconstructing to A != C).
+      const img = layered()
+      engine.smartFill(img, T, 10, { dilate: 1 })
+      assert.deepStrictEqual(pixelAt(img, 3, 1).slice(0, 3), C) // C ring, edge: unchanged source
+      assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), C) // C ring, corner: unchanged source
+      assert.deepStrictEqual(pixelAt(img, 3, 0).slice(0, 3), A) // far bg: unchanged
+    })
+
+    it('omitting options reproduces the legacy fill exactly (dilate defaults to 0)', () => {
+      const a = layered(); engine.smartFill(a, T, 10)
+      const b = layered(); engine.smartFill(b, T, 10, { dilate: 0 })
+      assert.deepStrictEqual(Array.from(a.data), Array.from(b.data))
+    })
+
+    it('clamps dilation to the region — never marks or changes pixels outside it', () => {
+      // Target at the top-left CORNER of the region; without clamping, dilation would expand
+      // up/left into pixels outside the region. Those must stay untouched.
+      const img = makeGrid([
+        [A, A, A, A, A],
+        [A, T, A, A, A],
+        [A, A, A, A, A],
+        [A, A, A, A, A],
+        [A, A, A, A, A]
+      ])
+      const { matched, unfilled } = engine.smartFill(img, T, 10, { dilate: 1 }, { x: 1, y: 1, width: 3, height: 3 })
+      assert.strictEqual(matched, 1)
+      assert.strictEqual(unfilled, 0)
+      assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), A) // target reconstructed from in-region bg
+      assert.deepStrictEqual(pixelAt(img, 0, 1).slice(0, 3), A) // just left of region: untouched
+      assert.deepStrictEqual(pixelAt(img, 1, 0).slice(0, 3), A) // just above region: untouched
+    })
+  })
+
   // Region selection (T17): the optional 5th arg constrains the scan to a rectangle in
   // image pixel coords. Omitting it must reproduce the whole-image behaviour exactly.
   describe('region (T17)', function () {

@@ -124,45 +124,47 @@
   }
 
   /*
-   * Smart fill — cardinal distance-weighted inpainting (T16, issue #16).
+   * Smart fill — BFS / Fast-Marching geodesic inpainting (T42; was cardinal in T16/#16).
    *
-   * For each pixel matching the target colour, scan outward in 4 cardinal directions (L/R/U/D)
-   * to the nearest ORIGINAL background pixel, then blend the 4 boundary colours weighted by
-   * inverse distance (1/d). Because every target pixel reaches the original background directly
-   * — with no intermediate filled pixels in the chain — there are no competing propagation
-   * fronts and no chevron seam. Works in a single pass after an O(WH) pre-computation step.
+   * Build a mask of pixels matching the target colour, then reconstruct each masked pixel from the
+   * surrounding background by a multi-source breadth-first fill: starting from mask-boundary pixels,
+   * expand inward layer by layer, setting each pixel to the inverse-distance-weighted mean of its
+   * already-KNOWN 8-neighbours (original background first; pixels finalized earlier in the BFS then
+   * become sources for deeper layers). Equivalent in spirit to the Telea Fast Marching Method used in
+   * GIMP heal / OpenCV inpaint.
    *
-   * Why not onion-peel? Onion-peel fills from the outside in, so interior pixels inherit values
-   * from previously-filled pixels (not the original background). On a gradient, the left-fill
-   * front and the right-fill front propagate inward and collide at a visible seam regardless of
-   * whether you use mode or mean aggregation. Cardinal interpolation bypasses that entirely.
+   * Why BFS over the old cardinal scan? Geodesic (path-following) distance never crosses a background
+   * gap, so concave masks (a watermark with a hole) no longer pull a distant wrong colour, and
+   * corner/edge pixels of a full-perimeter watermark always get reached and filled (fixes #32). On
+   * textured/gradient backgrounds the locally-nearest sources dominate, so the fill blends in instead
+   * of smearing one flat colour.
    *
-   * CONCAVE MASK CAVEAT: cardinal scans assume the nearest boundary in each direction is a
-   * meaningful source. On concave masks (e.g. a watermark with a hole), a scan may exit the
-   * target region, cross a gap of background, and hit the far boundary — pulling a distant
-   * colour. For MVP rectangular/text watermarks this is rarely an issue. BFS distance-weighted
-   * fill (Option 4) handles concave shapes better and is the documented next rung.
+   * Why no seam (cf. CORE-8)? The chevron seam of onion-peel came from UNORDERED ring-by-ring
+   * aggregation with competing fronts. Here the FIFO dequeues strictly in non-decreasing distance
+   * order, so the fill is a single monotonic front — sampling already-filled pixels is safe and is
+   * precisely what lets interiors with no original neighbour fill at all (see CORE-8 addendum).
    *
-   * FRINGE/HALO CAVEAT: anti-aliased letter edges blend into the background and fall just
-   * outside the exact-colour match, so the fill leaves them as a faint halo. Pass
-   * `options.dilate` (px) to expand the mask before filling and reconstruct that fringe instead
-   * of raising tolerance (which risks eating real background). The GUI passes `dilate: 1` (T30);
-   * the engine default is 0 (legacy behaviour). Raising tolerance is still an alternative.
+   * FRINGE/HALO: anti-aliased letter edges fall just outside the exact-colour match and survive as a
+   * faint halo. Pass `options.dilate` (px) to expand the mask before filling so that fringe is
+   * reconstructed from true background instead. The GUI passes `dilate: 1` (T30); engine default 0.
    *
    * @param {ImageData|{data,width,height}} imageData  RGBA buffer. Mutated IN PLACE.
    * @param {number[]} targetRgb   colour to remove, [r,g,b] (0-255).
    * @param {number} tolerance     Delta-E threshold (0-100). <= matches (same as replaceColour).
    * @param {object} [options]     `options.dilate` (number, default 0) — expand the match mask by
-   *        this many px before filling so anti-aliased edge pixels are reconstructed rather than
-   *        left as a halo (T30). 0 reproduces the legacy fill exactly.
-   * @param {object} [region]      Optional {x,y,width,height} in image pixel coords. When
-   *        supplied, only pixels inside the rectangle are masked + filled (T17). The region
-   *        edge then acts as a natural boundary: a matched pixel with no in-region non-target
-   *        neighbour in a direction simply has no source there and blends from the others.
-   *        Omitted → whole image. Clamped to image bounds.
-   * @returns {{imageData: ImageData, matched: number, unfilled: number}}
-   *        unfilled > 0 only when a target pixel has no non-target pixel in any direction
-   *        (e.g. an all-target image with no background to sample).
+   *        this many px before filling so anti-aliased edge pixels are reconstructed rather than left
+   *        as a halo (T30). 0 reproduces the legacy mask.
+   *        `options.maxFillRatio` (number, default 1 = off) — if the fill set covers more than this
+   *        fraction of the region, skip the fill entirely and return `skipped: true` (the result
+   *        would be garbage with so little background, and the work can stall the main thread — #31).
+   *        The GUI passes 0.8.
+   * @param {object} [region]      Optional {x,y,width,height} in image pixel coords. When supplied,
+   *        only pixels inside the rectangle are masked + filled (T17); the region edge acts as a
+   *        natural boundary (only in-region background is sampled). Omitted → whole image. Clamped.
+   * @returns {{imageData: ImageData, matched: number, unfilled: number, skipped?: boolean}}
+   *        matched = exact-colour match count (excludes dilated fringe). unfilled > 0 only when a
+   *        masked pixel has no path to any background source (e.g. an all-target image). skipped:true
+   *        when the maxFillRatio guard tripped — in that case the buffer is left untouched.
    */
   function smartFill (imageData, targetRgb, tolerance, options, region) {
     var data = imageData.data
@@ -220,72 +222,120 @@
       }
     }
 
-    // 2. Pre-compute the nearest original non-target pixel index and its distance in each of
-    //    the 4 cardinal directions, scanning only within the region bounds. Two linear passes
-    //    per row (L→R, R→L) + two per column (T→B, B→T). Sentinel: idx = -1 means no boundary
-    //    in that direction (also what the region edge yields — exactly the desired behaviour).
-    var lIdx = new Int32Array(n).fill(-1), lDst = new Uint16Array(n)
-    var rIdx = new Int32Array(n).fill(-1), rDst = new Uint16Array(n)
-    var uIdx = new Int32Array(n).fill(-1), uDst = new Uint16Array(n)
-    var dIdx = new Int32Array(n).fill(-1), dDst = new Uint16Array(n)
-    var lastP, lastX, lastY
-
-    // Boundary sources are pixels NOT in fillMask — i.e. original background, excluding any
-    // dilated fringe (which is contaminated with target colour and must not be sampled).
+    // 2. #31 guard. Count the fill set and bail if it covers almost the whole region: with that
+    //    little background left there is nothing meaningful to sample, the result is garbage, and
+    //    the O(area) work can stall the main thread long enough to corrupt a GPU frame (the stripe /
+    //    glitch artifacts in #31). Engine default maxFillRatio = 1 (effectively off) keeps the unit
+    //    tests deterministic; the GUI opts in with 0.8. `skipped` lets the caller warn + not paint.
+    var regionArea = (b.x1 - b.x0) * (b.y1 - b.y0)
+    var fillCount = 0
     for (y = b.y0; y < b.y1; y++) {
-      lastP = -1; lastX = 0
+      for (x = b.x0; x < b.x1; x++) { if (fillMask[y * width + x]) fillCount++ }
+    }
+    var maxFillRatio = (options && typeof options.maxFillRatio === 'number') ? options.maxFillRatio : 1
+    if (regionArea > 0 && fillCount / regionArea > maxFillRatio) {
+      return { imageData: imageData, matched: matched, unfilled: fillCount, skipped: true }
+    }
+
+    // 3. BFS / Fast-Marching geodesic fill. Process masked pixels in non-decreasing geodesic
+    //    (8-connected) distance from the mask boundary, estimating each pixel's colour as the
+    //    inverse-distance-weighted mean of its already-KNOWN neighbours. Geodesic distance follows
+    //    connected paths, so — unlike the old cardinal straight-line scan — it never crosses a
+    //    background gap (concave masks) and always reaches corner/edge pixels (#32).
+    //
+    //    A pixel is a colour SOURCE (known=1) if it is original background: in-region and NOT in
+    //    fillMask. The dilated fringe is in fillMask, so it is excluded as a source (CORE-8: never
+    //    sample target-contaminated pixels).
+    var known = new Uint8Array(n)   // 1 = valid colour source (original bg OR an already-filled px)
+    var queued = new Uint8Array(n)  // 1 = already placed in the queue (never enqueue twice)
+    for (y = b.y0; y < b.y1; y++) {
       for (x = b.x0; x < b.x1; x++) {
         p = y * width + x
-        if (!fillMask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { lIdx[p] = lastP; lDst[p] = x - lastX }
-      }
-      lastP = -1; lastX = 0
-      for (x = b.x1 - 1; x >= b.x0; x--) {
-        p = y * width + x
-        if (!fillMask[p]) { lastP = p; lastX = x } else if (lastP >= 0) { rIdx[p] = lastP; rDst[p] = lastX - x }
-      }
-    }
-    for (x = b.x0; x < b.x1; x++) {
-      lastP = -1; lastY = 0
-      for (y = b.y0; y < b.y1; y++) {
-        p = y * width + x
-        if (!fillMask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { uIdx[p] = lastP; uDst[p] = y - lastY }
-      }
-      lastP = -1; lastY = 0
-      for (y = b.y1 - 1; y >= b.y0; y--) {
-        p = y * width + x
-        if (!fillMask[p]) { lastP = p; lastY = y } else if (lastP >= 0) { dIdx[p] = lastP; dDst[p] = lastY - y }
+        if (!fillMask[p]) known[p] = 1
       }
     }
 
-    // 3. Single-pass inverse-distance-weighted fill. Each target pixel samples the 4 boundary
-    //    colours from original non-target pixels directly — no propagation chain, no fronts.
-    //    Safe to write in-place: lIdx/rIdx/uIdx/dIdx always point to fillMask=0 pixels which are
-    //    never written, so read/write sets are disjoint (no deferred-write buffer needed).
-    var timing = typeof window !== 'undefined'
-    if (timing) console.time('smartFill')
-    var unfilled = 0
-    var rS, gS, bS, wS, w, idx
+    // FIFO queue of absolute pixel indices (p = y*width + x). Sized by region area — a safe upper
+    // bound, since each fill pixel is enqueued at most once (the `queued` flag guards re-entry).
+    // Do NOT size by fillCount (undersizes → silent index overrun) and do NOT use an Array
+    // (`shift()` is O(n^2) — the perf trap behind #31). head/tail only advance; no wrap-around.
+    var queue = new Uint32Array(regionArea)
+    var head = 0, tail = 0
+    var dx, dy, nxp, nyp, np
 
+    // Seed the distance-1 layer: every fill pixel that touches an original-background source.
     for (y = b.y0; y < b.y1; y++) {
       for (x = b.x0; x < b.x1; x++) {
         p = y * width + x
         if (!fillMask[p]) continue
-        rS = 0; gS = 0; bS = 0; wS = 0
-
-        idx = lIdx[p]; if (idx >= 0) { w = 1 / lDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-        idx = rIdx[p]; if (idx >= 0) { w = 1 / rDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-        idx = uIdx[p]; if (idx >= 0) { w = 1 / uDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-        idx = dIdx[p]; if (idx >= 0) { w = 1 / dDst[p]; o = idx * 4; rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w }
-
-        if (wS === 0) { unfilled++; continue }
-        o = p * 4
-        data[o]     = Math.round(rS / wS)
-        data[o + 1] = Math.round(gS / wS)
-        data[o + 2] = Math.round(bS / wS)
-        // alpha preserved (not written) — mirrors replaceColour's 3-element behaviour
+        for (dy = -1; dy <= 1; dy++) {
+          nyp = y + dy
+          if (nyp < b.y0 || nyp >= b.y1) continue
+          for (dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue
+            nxp = x + dx
+            if (nxp < b.x0 || nxp >= b.x1) continue
+            if (known[nyp * width + nxp]) { queue[tail++] = p; queued[p] = 1; dy = 2; break }
+          }
+        }
       }
     }
-    if (timing) console.timeEnd('smartFill')
+
+    // Drain FIFO. BFS over unit (Chebyshev) edges dequeues in non-decreasing distance order, so the
+    // fill propagates as a single monotonic front — no competing fronts, no seam. Each popped pixel
+    // is guaranteed >=1 known neighbour (that is why it was enqueued), so wS > 0 always.
+    var rS, gS, bS, wS, w
+    while (head < tail) {
+      p = queue[head++]
+      x = p % width; y = (p / width) | 0
+      rS = 0; gS = 0; bS = 0; wS = 0
+      for (dy = -1; dy <= 1; dy++) {
+        nyp = y + dy
+        if (nyp < b.y0 || nyp >= b.y1) continue
+        for (dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue
+          nxp = x + dx
+          if (nxp < b.x0 || nxp >= b.x1) continue
+          np = nyp * width + nxp
+          if (!known[np]) continue
+          w = (dx !== 0 && dy !== 0) ? 0.70710678 : 1 // 1/d: orthogonal d=1, diagonal d=sqrt(2)
+          o = np * 4
+          rS += data[o] * w; gS += data[o + 1] * w; bS += data[o + 2] * w; wS += w
+        }
+      }
+      o = p * 4
+      data[o]     = Math.round(rS / wS)
+      data[o + 1] = Math.round(gS / wS)
+      data[o + 2] = Math.round(bS / wS)
+      // alpha preserved (not written) — mirrors replaceColour's 3-element behaviour
+      known[p] = 1 // intentional: distance-ordered BFS — a finalized pixel is a safe source for
+      //              deeper pixels; this is what fills concave interiors / corners that have no
+      //              original neighbour. Do NOT "fix" this back to original-only sampling — that
+      //              reintroduces the unfilled corners of #32 (see CORE-8 addendum in LEARNINGS.md).
+
+      // Enqueue the next distance layer: not-yet-queued fill neighbours of this pixel.
+      for (dy = -1; dy <= 1; dy++) {
+        nyp = y + dy
+        if (nyp < b.y0 || nyp >= b.y1) continue
+        for (dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue
+          nxp = x + dx
+          if (nxp < b.x0 || nxp >= b.x1) continue
+          np = nyp * width + nxp
+          if (fillMask[np] && !queued[np]) { queue[tail++] = np; queued[np] = 1 }
+        }
+      }
+    }
+
+    // Any fill pixel never enqueued had no path to a source (e.g. an all-target image, or a region
+    // with no in-region background) — it stays at its original colour and is reported as unfilled.
+    var unfilled = 0
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        p = y * width + x
+        if (fillMask[p] && !queued[p]) unfilled++
+      }
+    }
 
     return { imageData: imageData, matched: matched, unfilled: unfilled }
   }

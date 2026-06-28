@@ -284,6 +284,80 @@ describe('recolour engine', function () {
     })
   })
 
+  // BFS / Fast-Marching geodesic fill (T42). The cardinal scan left corner/edge pixels of a
+  // full-perimeter mask unfilled (#32) and could pull distant colours across gaps on concave
+  // masks. Geodesic BFS follows connected paths, so it reaches every pixel with a path to
+  // background. Also adds the #31 guard: options.maxFillRatio skips the fill when nearly the
+  // whole region matches.
+  describe('smartFill BFS / geodesic fill (T42)', function () {
+    const A = [0, 100, 0] // background
+    const T = [200, 0, 0] // target to remove
+
+    it('fills corner pixels of a full-perimeter mask that the cardinal scan left unfilled (#32)', () => {
+      // 5x5: the entire perimeter (ring) is target, the inner 3x3 is background. From a corner,
+      // every cardinal ray runs along the all-target edge and finds no source -> cardinal left it
+      // unfilled. The corner is 8-connected to an interior background pixel, so BFS fills it.
+      const img = makeGrid([
+        [T, T, T, T, T],
+        [T, A, A, A, T],
+        [T, A, A, A, T],
+        [T, A, A, A, T],
+        [T, T, T, T, T]
+      ])
+      const { matched, unfilled } = engine.smartFill(img, T, 10)
+      assert.strictEqual(matched, 16)              // the 16 perimeter pixels
+      assert.strictEqual(unfilled, 0)              // nothing left unfilled — the #32 fix
+      assert.deepStrictEqual(pixelAt(img, 0, 0).slice(0, 3), A) // corner reconstructed from interior bg
+      assert.deepStrictEqual(pixelAt(img, 4, 4).slice(0, 3), A) // opposite corner too
+    })
+
+    it('reaches a deep concave interior with no original neighbour (geodesic propagation)', () => {
+      // A solid 3x3 target block walled by background only on the outside. The dead-centre pixel
+      // has no original-background neighbour; it fills only because BFS lets earlier-filled pixels
+      // act as sources in strict distance order.
+      const img = makeGrid([
+        [A, A, A, A, A],
+        [A, T, T, T, A],
+        [A, T, T, T, A],
+        [A, T, T, T, A],
+        [A, A, A, A, A]
+      ])
+      const { unfilled } = engine.smartFill(img, T, 10)
+      assert.strictEqual(unfilled, 0)
+      assert.deepStrictEqual(pixelAt(img, 2, 2).slice(0, 3), A)
+    })
+
+    describe('maxFillRatio guard (#31)', function () {
+      // 5x5: only the 4 corners are background (4/25), so 21/25 = 0.84 of the region is fill.
+      function mostlyTarget () {
+        return makeGrid([
+          [A, T, T, T, A],
+          [T, T, T, T, T],
+          [T, T, T, T, T],
+          [T, T, T, T, T],
+          [A, T, T, T, A]
+        ])
+      }
+
+      it('skips the fill and returns skipped:true when fill ratio exceeds maxFillRatio', () => {
+        const img = mostlyTarget()
+        const res = engine.smartFill(img, T, 10, { maxFillRatio: 0.8 })
+        assert.strictEqual(res.skipped, true)
+        assert.strictEqual(res.matched, 21)
+        assert.strictEqual(res.unfilled, 21)                       // every fill pixel reported unfilled
+        assert.deepStrictEqual(pixelAt(img, 2, 2).slice(0, 3), T)  // buffer untouched
+      })
+
+      it('fills normally when maxFillRatio is omitted (engine default = off)', () => {
+        const img = mostlyTarget()
+        const res = engine.smartFill(img, T, 10)
+        assert.notStrictEqual(res.skipped, true)
+        assert.strictEqual(res.unfilled, 0)
+        assert.deepStrictEqual(pixelAt(img, 2, 2).slice(0, 3), A)  // reconstructed from the corner bg
+      })
+    })
+  })
+
   // Region selection (T17): the optional 5th arg constrains the scan to a rectangle in
   // image pixel coords. Omitting it must reproduce the whole-image behaviour exactly.
   describe('region (T17)', function () {

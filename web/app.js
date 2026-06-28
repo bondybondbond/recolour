@@ -40,6 +40,8 @@
   var resetBtn = document.getElementById('resetBtn')
   var undoBtn = document.getElementById('undoBtn')
   var canvasArea = canvas.parentNode
+  var canvasHint = document.querySelector('.canvas-hint')
+  var canvasHintDefault = canvasHint ? canvasHint.textContent : ''
 
   // Region selection (T17)
   var regionBtn = document.getElementById('regionBtn')
@@ -927,14 +929,42 @@
       canvas.width,
       canvas.height
     )
-    // Smart fill (T16) reconstructs matched pixels from their neighbours and ignores the
+    // Smart fill (T16/T42) reconstructs matched pixels from their neighbours and ignores the
     // selected replace colour; the flat path overwrites them with it. `region` (T17) is null
     // for whole-image and constrains both paths to the drawn box when set. `dilate: 1` (T30)
     // expands the mask 1px so anti-aliased watermark edges are reconstructed, not left as a halo.
-    if (smartFillOn) Engine.smartFill(work, targetRgb, tol, { dilate: 1 }, region)
-    else Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol, region)
+    // `maxFillRatio: 0.8` (T42/#31) skips the fill when nearly the whole image matches — the result
+    // would be garbage and the work can stall the main thread into a render glitch.
+    if (smartFillOn) {
+      var r = Engine.smartFill(work, targetRgb, tol, { dilate: 1, maxFillRatio: 0.8 }, region)
+      if (r && r.skipped) {
+        // Too much of the image matches: leave the canvas on its prior (committed) state and warn.
+        // `work` is an untouched copy of baseImageData, so painting it is a safe no-op repaint.
+        showHintWarning('⚠ Smart fill skipped — too much of the image matches. Lower the tolerance.')
+        ctx.putImageData(work, 0, 0)
+        livePreviewImageData = work
+        return
+      }
+      clearHintWarning()
+    } else {
+      clearHintWarning()
+      Engine.replaceColour(work, targetRgb, selectedReplaceRgb(), tol, region)
+    }
     ctx.putImageData(work, 0, 0)
     livePreviewImageData = work // loupe reads this so it shows the in-progress result
+  }
+
+  // The #31 guard surfaces through the existing .canvas-hint pill (no toast system in this app):
+  // cache the default instruction text once, swap in a warning, and restore on the next clean render.
+  function showHintWarning (msg) {
+    if (!canvasHint) return
+    canvasHint.textContent = msg
+    canvasHint.classList.add('warn')
+  }
+  function clearHintWarning () {
+    if (!canvasHint || !canvasHint.classList.contains('warn')) return
+    canvasHint.textContent = canvasHintDefault
+    canvasHint.classList.remove('warn')
   }
 
   // ---------------------------------------------------------------------------

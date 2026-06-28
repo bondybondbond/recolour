@@ -972,10 +972,18 @@
     }
   }
 
+  // Watermark detection profile (#45). The #45 calibration sweep (scripts/calibrate-detect.js) proved
+  // edge-detection + static thresholds CANNOT isolate a faint tiled watermark from photographic
+  // content: on the WhatsApp school-photo fixtures the candidates land on faces/uniforms, not the
+  // watermark (mask is 2-30% light — see #45 evidence). The real fix is frequency-domain (FFT) tiling
+  // detection, tracked in a follow-up ticket. Until then the overlay stays at its pre-#45 behaviour:
+  // preContrast:false is passed EXPLICITLY because the #45 buildLut fix made the documented default
+  // (true) actually apply — without this the overlay would silently flip to pc=true (a regression).
+  var DETECT_PROFILE = { edgeThreshold: 150, preContrast: false }
+
   function runDetect () {
     if (!detectOn || !baseImageData) return
-    // edgeThreshold is a starting point — calibrate on real fixtures (see dev-plan open questions).
-    var result = Engine.detectWatermark(baseImageData, { edgeThreshold: 150 }, region)
+    var result = Engine.detectWatermark(baseImageData, DETECT_PROFILE, region)
     paintDetectOverlay(result)
     var n = result.components.length
     if (n > 0) setDetectHint('🔎 Found ' + n + ' candidate region' + (n === 1 ? '' : 's') + ' — highlighted (image unchanged)', false)

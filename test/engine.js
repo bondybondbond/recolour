@@ -555,5 +555,86 @@ describe('recolour engine', function () {
       assert.ok(four.confidence > one.confidence, `expected ${four.confidence} > ${one.confidence}`)
       assert.ok(one.confidence >= 0 && four.confidence <= 1, 'confidence must stay in [0,1]')
     })
+
+    // ---- #45 lever regression ---------------------------------------------------------------
+    // Exercises the new blurRadius + minAspect levers MECHANICALLY on a high-contrast synthetic: blur
+    // + high threshold + wide-aspect gate drop mid-frequency texture while keeping a wide light stroke.
+    // NB: #45 found this does NOT generalise to FAINT tiled watermarks on real photos (edge detection
+    // can't separate them — re-scoped to an FFT ticket); these tests guard the lever plumbing, not
+    // real-watermark efficacy. The GUI ships a conservative profile, not this one.
+    const DETECT_PROFILE = { blurRadius: 1, edgeThreshold: 300, preContrast: false, minAspect: 3 }
+
+    // A DISTINCT, deterministic adversarial fixture — built separately from the harness synthetic in
+    // scripts/calibrate-detect.js, so these tests can't pass merely by sharing its tuned shape.
+    // Diagonal mid-frequency stripes + per-cell hash jitter approximate photo texture. The optional
+    // watermark is a thick "comb" (continuous baseline + upward teeth): a thin stroke fragments under
+    // blur, a solid bar reads as a block (fill-ratio), separate letters are too narrow for minAspect,
+    // and an enclosed shape fills its holes — a comb is wide (aspect >> 3), thick enough to survive
+    // blur, sparse with NO enclosed holes (low fill-ratio), and one connected component.
+    function adversarial (withWatermark) {
+      const w = 200, h = 140
+      const data = new Uint8ClampedArray(w * h * 4)
+      const hash = (x, y) => { let v = (x * 374761393 + y * 668265263) >>> 0; v = (v ^ (v >> 13)) >>> 0; return v % 48 }
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const o = (y * w + x) * 4
+          const stripe = ((x + y) % 6 < 3) ? 26 : -26 // diagonal mid-freq stripes
+          const jitter = hash(x >> 1, y >> 1) - 24 // ~ +-24, constant within a 2px cell
+          let base = 120 + stripe + jitter
+          if (base < 0) base = 0; if (base > 255) base = 255
+          data[o] = data[o + 1] = data[o + 2] = base
+          data[o + 3] = 255
+        }
+      }
+      const x0 = 20, x1 = 180, baseY = 74, thick = 3, toothH = 10, toothW = 3, toothGap = 12
+      const wmBox = { x0: x0, y0: baseY - toothH, x1: x1, y1: baseY + thick }
+      const stamp = (x, y) => { const o = (y * w + x) * 4; data[o] = data[o + 1] = data[o + 2] = 250 }
+      if (withWatermark) {
+        for (let x = x0; x <= x1; x++) for (let t = 0; t < thick; t++) stamp(x, baseY + t) // baseline
+        for (let x = x0; x <= x1; x += toothGap) { // upward teeth
+          for (let ty = baseY - toothH; ty < baseY; ty++) for (let tw = 0; tw < toothW; tw++) if (x + tw <= x1) stamp(x + tw, ty)
+        }
+      }
+      return { img: { data: data, width: w, height: h }, wmBox: wmBox }
+    }
+
+    it('drops photographic texture: adversarial field (no watermark) yields <= 3 candidates', () => {
+      const { img } = adversarial(false)
+      const { components } = engine.detectWatermark(img, DETECT_PROFILE)
+      assert.ok(components.length <= 3, `texture must be rejected, got ${components.length} candidates`)
+    })
+
+    it('keeps the watermark: stamped wide light stroke survives the profile and clears minAspect', () => {
+      const { img, wmBox } = adversarial(true)
+      const { components } = engine.detectWatermark(img, DETECT_PROFILE)
+      assert.ok(components.length >= 1, 'watermark stroke must be detected')
+      const wm = components.find(c =>
+        c.x1 >= wmBox.x0 && c.x0 <= wmBox.x1 && c.y1 >= wmBox.y0 && c.y0 <= wmBox.y1)
+      assert.ok(wm, 'a passing component must overlap the watermark band')
+      assert.ok((wm.x1 - wm.x0 + 1) / (wm.y1 - wm.y0 + 1) >= 3, 'watermark bbox must clear minAspect=3')
+    })
+
+    it('preContrast default guard: option-less call detects the near-grey watermark (default now ON)', () => {
+      // Pins the buildLut fallback fix (#45): the documented preContrast:true default must actually
+      // apply when no options are passed. bg=[128] fg=[155] is below raw-Sobel threshold (108 < 150)
+      // and only crosses it after invert+contrast.
+      const bg = [128, 128, 128]
+      const fg = [155, 155, 155]
+      const img = solid(24, 24, bg)
+      plus(img, 12, 12, 7, fg)
+      assert.ok(engine.detectWatermark(img).components.length >= 1,
+        'default (no options) must apply preContrast:true and detect the near-grey watermark')
+      assert.strictEqual(engine.detectWatermark(img, { preContrast: false }).components.length, 0,
+        'explicit preContrast:false must still fall below threshold (default is not forced)')
+    })
+
+    it('new levers default to no-ops: blurRadius=0 and minAspect=0 leave option-less detection intact', () => {
+      // A near-square "+" (aspect ~1) must still pass with no options — proves minAspect defaults to 0
+      // (not the GUI profile's 3) and blurRadius defaults to 0 (no smoothing of the small shape).
+      const img = solid(24, 24, WHITE)
+      plus(img, 12, 12, 7, BLACK)
+      assert.ok(engine.detectWatermark(img).components.length >= 1,
+        'square shape must survive default levers (no aspect gate, no blur)')
+    })
   })
 })

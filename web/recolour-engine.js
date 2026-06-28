@@ -380,12 +380,26 @@
    *        mask is full-image-sized (1 = watermark pixel). components are the PASSING (text-like)
    *        ones in image coords. confidence is in [0,1], reported but not thresholded here.
    */
+  // ENGINE DEFAULTS are intentionally CONSERVATIVE/generic — the new levers (blurRadius, minAspect)
+  // default to no-ops so option-less callers and the unit suite keep their existing behaviour.
+  //
+  // #45 calibration finding (scripts/calibrate-detect.js): edge-detection + static thresholds CANNOT
+  // isolate a FAINT TILED watermark from photographic content. On the WhatsApp school-photo fixtures
+  // neither preContrast setting works — pc=false's candidates land on faces/uniforms (mask 3-30%
+  // light), pc=true's mask is 2-3% light (still photo edges; the watermark sits below the edge-noise
+  // floor). It works only on a HIGH-CONTRAST watermark (watermark.jpg's pink text: mask 54% light).
+  // The watermark's separable signal is its regular TILING -> frequency domain (FFT), tracked in a
+  // follow-up ticket. The blurRadius/minAspect levers + harness remain as infrastructure for that work.
   var DETECT_DEFAULTS = {
-    edgeThreshold: 150,    // max-channel Sobel |gx|+|gy| (range ~0-2040). CALIBRATE on fixtures.
+    blurRadius: 0,         // Gaussian/box pre-pass before Sobel (0=none,1=3x3,2=5x5). Suppresses
+                           // photo-texture high-freq noise so it falls below edgeThreshold (#45).
+    edgeThreshold: 150,    // max-channel Sobel |gx|+|gy| (range ~0-2040).
     minArea: 10,           // px — reject sub-noise specks
     maxAreaRatio: 0.5,     // reject a component covering more than this fraction of the region
     maxFillRatio: 0.65,    // filled-area / bbox-area above this = solid block -> reject
     minPerimeterRatio: 0.3, // perimeter / area below this = chunky/solid -> reject
+    minAspect: 0,          // require bbox width/height >= this. Watermark text spans wide bboxes;
+                           // near-square blobs are texture. 0 = off (generic).
     preContrast: true      // default ON: invert+contrast (CORE-13) amplifies light/white watermarks
                            // to dark edges before Sobel. Grey-on-grey is the residual hard case
                            // (invert(grey)≈grey), but real-world watermarks are usually light.
@@ -403,6 +417,48 @@
     return lut
   }
 
+  // Separable box blur over the RGB channels inside region `b`, radius `r` (window 2r+1). Returns a
+  // fresh RGBA Uint8ClampedArray sized like `data` — only the region is meaningful, the rest is left
+  // zero (the Sobel pass never reads outside `b`). Two passes (horizontal then vertical) via a scratch
+  // buffer; sample counts are clamped to the region edges so border pixels normalise correctly.
+  // Box blur approximates a Gaussian closely enough at these radii and is O(n) regardless of r (#45).
+  function blurRegionRgb (data, width, b, r) {
+    var out = new Uint8ClampedArray(data.length)
+    var tmp = new Float32Array(data.length) // holds the horizontal-pass result (RGB only)
+    var x, y, ch, k, o, count, sum
+    // Horizontal pass: data -> tmp
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        o = (y * width + x) * 4
+        for (ch = 0; ch < 3; ch++) {
+          sum = 0; count = 0
+          for (k = -r; k <= r; k++) {
+            var sx = x + k
+            if (sx < b.x0 || sx >= b.x1) continue
+            sum += data[(y * width + sx) * 4 + ch]; count++
+          }
+          tmp[o + ch] = sum / count
+        }
+      }
+    }
+    // Vertical pass: tmp -> out
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        o = (y * width + x) * 4
+        for (ch = 0; ch < 3; ch++) {
+          sum = 0; count = 0
+          for (k = -r; k <= r; k++) {
+            var sy = y + k
+            if (sy < b.y0 || sy >= b.y1) continue
+            sum += tmp[(sy * width + x) * 4 + ch]; count++
+          }
+          out[o + ch] = Math.round(sum / count)
+        }
+      }
+    }
+    return out
+  }
+
   function detectWatermark (imageData, options, region) {
     var data = imageData.data
     var width = imageData.width
@@ -410,18 +466,29 @@
     var n = width * height
     var b = clampRegion(region, width, height)
     var opt = options || {}
+    var blurRadius = opt.blurRadius != null ? opt.blurRadius : DETECT_DEFAULTS.blurRadius
     var edgeThreshold = opt.edgeThreshold != null ? opt.edgeThreshold : DETECT_DEFAULTS.edgeThreshold
     var minArea = opt.minArea != null ? opt.minArea : DETECT_DEFAULTS.minArea
     var maxAreaRatio = opt.maxAreaRatio != null ? opt.maxAreaRatio : DETECT_DEFAULTS.maxAreaRatio
     var maxFillRatio = opt.maxFillRatio != null ? opt.maxFillRatio : DETECT_DEFAULTS.maxFillRatio
     var minPerimeterRatio = opt.minPerimeterRatio != null ? opt.minPerimeterRatio : DETECT_DEFAULTS.minPerimeterRatio
-    var lut = buildLut(!!opt.preContrast)
+    var minAspect = opt.minAspect != null ? opt.minAspect : DETECT_DEFAULTS.minAspect
+    // preContrast must fall back to the default like every other knob — `!!opt.preContrast` ignored
+    // DETECT_DEFAULTS.preContrast, so the documented `default ON` never applied (engine + GUI ran raw
+    // Sobel). Consult the default explicitly (#45).
+    var preContrast = opt.preContrast != null ? opt.preContrast : DETECT_DEFAULTS.preContrast
+    var lut = buildLut(!!preContrast)
 
     var regionArea = (b.x1 - b.x0) * (b.y1 - b.y0)
     var mask = new Uint8Array(n)
     if (regionArea <= 0) return { mask: mask, components: [], confidence: 0 }
 
     var x, y, p, dx, dy, nx, ny, ch
+
+    // 0. Optional Gaussian/box pre-blur (#45). Sobel amplifies high frequencies, so smoothing first
+    //    drops sub-pixel photo texture below threshold while leaving strong watermark edges. Runs on
+    //    a working COPY of the RGB channels — `data` (the caller's buffer) stays read-only.
+    var src = blurRadius > 0 ? blurRegionRgb(data, width, b, blurRadius) : data
 
     // 1. Per-channel Sobel -> edge map. Neighbours are clamped to the region (edge replication),
     //    so border pixels still get a gradient instead of a false zero.
@@ -437,9 +504,9 @@
         var oBL = (yp1 * width + xm1) * 4, oB = (yp1 * width + x) * 4, oBR = (yp1 * width + xp1) * 4
         var maxMag = 0
         for (ch = 0; ch < 3; ch++) {
-          var tl = lut[data[oTL + ch]], t = lut[data[oT + ch]], tr = lut[data[oTR + ch]]
-          var l = lut[data[oL + ch]], r = lut[data[oR + ch]]
-          var bl = lut[data[oBL + ch]], bb = lut[data[oB + ch]], br = lut[data[oBR + ch]]
+          var tl = lut[src[oTL + ch]], t = lut[src[oT + ch]], tr = lut[src[oTR + ch]]
+          var l = lut[src[oL + ch]], r = lut[src[oR + ch]]
+          var bl = lut[src[oBL + ch]], bb = lut[src[oB + ch]], br = lut[src[oBR + ch]]
           var gx = -tl - 2 * l - bl + tr + 2 * r + br
           var gy = -tl - 2 * t - tr + bl + 2 * bb + br
           var mag = (gx < 0 ? -gx : gx) + (gy < 0 ? -gy : gy)
@@ -537,13 +604,15 @@
       var c = components[ci]
       var bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1
       var bboxArea = bw * bh
+      var aspect = bw / bh // watermark text spans wide bboxes; near-square blobs are texture (#45)
       var filledArea = fillHoles(c.pixels, width, c.x0, c.y0, bw, bh)
       var fillRatio = filledArea / bboxArea
       var perimRatio = c.area > 0 ? c.perimeter / c.area : 0
       var isText = c.area >= minArea &&
         (c.area / regionArea) <= maxAreaRatio &&
         fillRatio <= maxFillRatio &&
-        perimRatio >= minPerimeterRatio
+        perimRatio >= minPerimeterRatio &&
+        aspect >= minAspect
       if (!isText) continue
       for (var pi = 0; pi < c.pixels.length; pi++) mask[c.pixels[pi]] = 1
       passing.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, area: c.area, perimeter: c.perimeter })

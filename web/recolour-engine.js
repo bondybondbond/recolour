@@ -340,10 +340,280 @@
     return { imageData: imageData, matched: matched, unfilled: unfilled }
   }
 
+  /*
+   * Watermark detection (T29 Phase 2) — pure, dependency-free, Node-testable.
+   *
+   * Move from "remove this colour" to "find this kind of thing": locate text-shaped regions
+   * automatically and return a binary mask + per-component metadata + a confidence score. This
+   * slice does NOT apply any fill — the mask is surfaced (display-only overlay) for the user to
+   * confirm; the confirm -> fill step lands with the T43 routing engine (#44).
+   *
+   * Pipeline (all bounded to the clamped region):
+   *   1. Per-channel Sobel: run the Sobel kernel on R, G and B separately and take the MAX
+   *      gradient magnitude across the three channels — not on luminance. Watermark edges often
+   *      have strong per-channel colour separation even when luminance contrast is near zero
+   *      (an iso-luminant colour overlay); a luminance-only pass would miss those and pick up
+   *      background texture just as readily. Threshold -> binary edge map.
+   *   2. Morphological close (dilate then erode, radius 1) to bridge glyph strokes into solid
+   *      blobs so the mask covers the glyph body, not just its hollow outline. Implemented as
+   *      two flat array passes through a scratch buffer (NOT per-pixel function calls) — this is
+   *      the heaviest step (two O(W*H) 3x3 scans).
+   *   3. Connected-component labelling via iterative 8-connected BFS (no recursion — a deep
+   *      component would blow the call stack on a large image). Queue sized by region area
+   *      (CORE-12): each pixel is enqueued at most once (visited guard), so that is a safe bound.
+   *   4. Classify each component as text-like with the documented heuristics. Edge detection of a
+   *      SOLID block yields a hollow ring, which would masquerade as thin "text" — so each
+   *      component's interior holes are flood-filled first and the FILLED area drives the
+   *      bbox-fill-ratio test. A solid block fills its bbox (rejected); letters do not (kept).
+   *   5. Union the surviving components' (stroke) pixels into the output mask.
+   *   6. Confidence in [0,1]: combine component count (saturating) with size regularity (low
+   *      coefficient-of-variation of areas => a repeating watermark => high confidence).
+   *
+   * @param {ImageData|{data,width,height}} imageData  RGBA buffer. NOT mutated (read-only).
+   * @param {object} [options]  edgeThreshold, minArea, maxAreaRatio, maxFillRatio,
+   *        minPerimeterRatio, preContrast — see DETECT_DEFAULTS. Defaults keep tests
+   *        deterministic; the GUI may tune without touching the engine. edgeThreshold MUST be
+   *        calibrated on real fixtures (the default is a starting point, not a tuned value).
+   * @param {object} [region]   Optional {x,y,width,height} in image px. Detection runs only
+   *        inside the clamped rect (whole image when omitted).
+   * @returns {{mask: Uint8Array, components: Array<{x0,y0,x1,y1,area,perimeter}>, confidence: number}}
+   *        mask is full-image-sized (1 = watermark pixel). components are the PASSING (text-like)
+   *        ones in image coords. confidence is in [0,1], reported but not thresholded here.
+   */
+  var DETECT_DEFAULTS = {
+    edgeThreshold: 150,    // max-channel Sobel |gx|+|gy| (range ~0-2040). CALIBRATE on fixtures.
+    minArea: 10,           // px — reject sub-noise specks
+    maxAreaRatio: 0.5,     // reject a component covering more than this fraction of the region
+    maxFillRatio: 0.65,    // filled-area / bbox-area above this = solid block -> reject
+    minPerimeterRatio: 0.3, // perimeter / area below this = chunky/solid -> reject
+    preContrast: true      // default ON: invert+contrast (CORE-13) amplifies light/white watermarks
+                           // to dark edges before Sobel. Grey-on-grey is the residual hard case
+                           // (invert(grey)≈grey), but real-world watermarks are usually light.
+  }
+
+  // Per-value transform LUT. With preContrast it is the invert(1)+contrast(1.6) recipe proven in
+  // Phase 1 (CORE-13); otherwise an identity table so the Sobel read stays branch-free.
+  function buildLut (preContrast) {
+    var lut = new Uint8Array(256)
+    for (var v = 0; v < 256; v++) {
+      if (!preContrast) { lut[v] = v; continue }
+      var c = ((255 - v) - 128) * 1.6 + 128 // invert, then contrast about mid-grey
+      lut[v] = c < 0 ? 0 : (c > 255 ? 255 : Math.round(c))
+    }
+    return lut
+  }
+
+  function detectWatermark (imageData, options, region) {
+    var data = imageData.data
+    var width = imageData.width
+    var height = imageData.height
+    var n = width * height
+    var b = clampRegion(region, width, height)
+    var opt = options || {}
+    var edgeThreshold = opt.edgeThreshold != null ? opt.edgeThreshold : DETECT_DEFAULTS.edgeThreshold
+    var minArea = opt.minArea != null ? opt.minArea : DETECT_DEFAULTS.minArea
+    var maxAreaRatio = opt.maxAreaRatio != null ? opt.maxAreaRatio : DETECT_DEFAULTS.maxAreaRatio
+    var maxFillRatio = opt.maxFillRatio != null ? opt.maxFillRatio : DETECT_DEFAULTS.maxFillRatio
+    var minPerimeterRatio = opt.minPerimeterRatio != null ? opt.minPerimeterRatio : DETECT_DEFAULTS.minPerimeterRatio
+    var lut = buildLut(!!opt.preContrast)
+
+    var regionArea = (b.x1 - b.x0) * (b.y1 - b.y0)
+    var mask = new Uint8Array(n)
+    if (regionArea <= 0) return { mask: mask, components: [], confidence: 0 }
+
+    var x, y, p, dx, dy, nx, ny, ch
+
+    // 1. Per-channel Sobel -> edge map. Neighbours are clamped to the region (edge replication),
+    //    so border pixels still get a gradient instead of a false zero.
+    var edge = new Uint8Array(n)
+    for (y = b.y0; y < b.y1; y++) {
+      var ym1 = y > b.y0 ? y - 1 : b.y0
+      var yp1 = y < b.y1 - 1 ? y + 1 : b.y1 - 1
+      for (x = b.x0; x < b.x1; x++) {
+        var xm1 = x > b.x0 ? x - 1 : b.x0
+        var xp1 = x < b.x1 - 1 ? x + 1 : b.x1 - 1
+        var oTL = (ym1 * width + xm1) * 4, oT = (ym1 * width + x) * 4, oTR = (ym1 * width + xp1) * 4
+        var oL = (y * width + xm1) * 4, oR = (y * width + xp1) * 4
+        var oBL = (yp1 * width + xm1) * 4, oB = (yp1 * width + x) * 4, oBR = (yp1 * width + xp1) * 4
+        var maxMag = 0
+        for (ch = 0; ch < 3; ch++) {
+          var tl = lut[data[oTL + ch]], t = lut[data[oT + ch]], tr = lut[data[oTR + ch]]
+          var l = lut[data[oL + ch]], r = lut[data[oR + ch]]
+          var bl = lut[data[oBL + ch]], bb = lut[data[oB + ch]], br = lut[data[oBR + ch]]
+          var gx = -tl - 2 * l - bl + tr + 2 * r + br
+          var gy = -tl - 2 * t - tr + bl + 2 * bb + br
+          var mag = (gx < 0 ? -gx : gx) + (gy < 0 ? -gy : gy)
+          if (mag > maxMag) maxMag = mag
+        }
+        if (maxMag >= edgeThreshold) edge[y * width + x] = 1
+      }
+    }
+
+    // 2. Morphological close. Pass A dilates edge -> scratch (any 3x3 neighbour set); pass B
+    //    erodes scratch -> closed (all in-bounds 3x3 neighbours set). Two flat passes, scratch
+    //    buffer between them — never a per-pixel helper call.
+    var scratch = new Uint8Array(n)
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        var any = 0
+        for (dy = -1; dy <= 1 && !any; dy++) {
+          ny = y + dy
+          if (ny < b.y0 || ny >= b.y1) continue
+          for (dx = -1; dx <= 1; dx++) {
+            nx = x + dx
+            if (nx < b.x0 || nx >= b.x1) continue
+            if (edge[ny * width + nx]) { any = 1; break }
+          }
+        }
+        if (any) scratch[y * width + x] = 1
+      }
+    }
+    var closed = new Uint8Array(n)
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        var all = 1
+        for (dy = -1; dy <= 1 && all; dy++) {
+          ny = y + dy
+          if (ny < b.y0 || ny >= b.y1) continue
+          for (dx = -1; dx <= 1; dx++) {
+            nx = x + dx
+            if (nx < b.x0 || nx >= b.x1) continue
+            if (!scratch[ny * width + nx]) { all = 0; break }
+          }
+        }
+        if (all) closed[y * width + x] = 1
+      }
+    }
+
+    // 3. Connected components (iterative 8-connected BFS). visited guards re-entry; the queue is
+    //    sized by region area (a safe upper bound — see CORE-12). Pixels of each component are
+    //    collected so steps 4-5 can hole-fill + union without a second labelling pass.
+    var visited = new Uint8Array(n)
+    var queue = new Uint32Array(regionArea)
+    var components = []
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        p = y * width + x
+        if (!closed[p] || visited[p]) continue
+        var head = 0, tail = 0
+        queue[tail++] = p; visited[p] = 1
+        var area = 0, perim = 0
+        var minx = x, maxx = x, miny = y, maxy = y
+        var pixels = []
+        while (head < tail) {
+          var cp = queue[head++]
+          var cx = cp % width, cy = (cp / width) | 0
+          area++
+          pixels.push(cp)
+          if (cx < minx) minx = cx
+          if (cx > maxx) maxx = cx
+          if (cy < miny) miny = cy
+          if (cy > maxy) maxy = cy
+          // Perimeter: pixel touches the background on any 4-neighbour (or the region edge).
+          if (cy - 1 < b.y0 || !closed[(cy - 1) * width + cx] ||
+              cy + 1 >= b.y1 || !closed[(cy + 1) * width + cx] ||
+              cx - 1 < b.x0 || !closed[cy * width + cx - 1] ||
+              cx + 1 >= b.x1 || !closed[cy * width + cx + 1]) perim++
+          for (dy = -1; dy <= 1; dy++) {
+            ny = cy + dy
+            if (ny < b.y0 || ny >= b.y1) continue
+            for (dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue
+              nx = cx + dx
+              if (nx < b.x0 || nx >= b.x1) continue
+              var np = ny * width + nx
+              if (closed[np] && !visited[np]) { visited[np] = 1; queue[tail++] = np }
+            }
+          }
+        }
+        components.push({ x0: minx, y0: miny, x1: maxx, y1: maxy, area: area, perimeter: perim, pixels: pixels })
+      }
+    }
+
+    // 4. Classify + 5. union mask. The FILLED area (component + enclosed holes) drives the
+    //    bbox-fill-ratio so a hollow ring from a solid block reads as solid, not text.
+    var passing = []
+    for (var ci = 0; ci < components.length; ci++) {
+      var c = components[ci]
+      var bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1
+      var bboxArea = bw * bh
+      var filledArea = fillHoles(c.pixels, width, c.x0, c.y0, bw, bh)
+      var fillRatio = filledArea / bboxArea
+      var perimRatio = c.area > 0 ? c.perimeter / c.area : 0
+      var isText = c.area >= minArea &&
+        (c.area / regionArea) <= maxAreaRatio &&
+        fillRatio <= maxFillRatio &&
+        perimRatio >= minPerimeterRatio
+      if (!isText) continue
+      for (var pi = 0; pi < c.pixels.length; pi++) mask[c.pixels[pi]] = 1
+      passing.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, area: c.area, perimeter: c.perimeter })
+    }
+
+    // 6. Confidence in [0,1]: count (saturating at 8) * size regularity (1 - clamped CoV of areas).
+    var count = passing.length
+    var confidence = 0
+    if (count > 0) {
+      var sum = 0
+      for (var k = 0; k < count; k++) sum += passing[k].area
+      var mean = sum / count
+      var varSum = 0
+      for (var k2 = 0; k2 < count; k2++) { var d = passing[k2].area - mean; varSum += d * d }
+      var cov = mean > 0 ? Math.sqrt(varSum / count) / mean : 1
+      var regularity = 1 - (cov > 1 ? 1 : cov)
+      confidence = Math.min(count / 8, 1) * regularity
+    }
+
+    return { mask: mask, components: passing, confidence: confidence }
+  }
+
+  // Count the FILLED area of one component: its own pixels plus any background cells enclosed by
+  // it. Works on a local bw*bh grid of the component's bbox: mark occupied cells, flood the
+  // OUTSIDE inward from the bbox border (4-connected over empty cells), then filled = total minus
+  // the cells the outside flood reached. A hollow ring (solid block's edge) fills to ~1.0; an open
+  // letter shape barely fills at all.
+  function fillHoles (pixels, width, ox, oy, bw, bh) {
+    var size = bw * bh
+    var occ = new Uint8Array(size)
+    var i
+    for (i = 0; i < pixels.length; i++) {
+      var px = pixels[i] // absolute image pixel index -> local bbox coords
+      var ax = px % width, ay = (px / width) | 0
+      occ[(ay - oy) * bw + (ax - ox)] = 1
+    }
+    var outside = new Uint8Array(size)
+    var stack = new Int32Array(size)
+    var top = 0
+    // Seed every empty border cell.
+    var lx, ly
+    for (lx = 0; lx < bw; lx++) {
+      if (!occ[lx] && !outside[lx]) { outside[lx] = 1; stack[top++] = lx }
+      var bidx = (bh - 1) * bw + lx
+      if (!occ[bidx] && !outside[bidx]) { outside[bidx] = 1; stack[top++] = bidx }
+    }
+    for (ly = 0; ly < bh; ly++) {
+      var lidx = ly * bw
+      if (!occ[lidx] && !outside[lidx]) { outside[lidx] = 1; stack[top++] = lidx }
+      var ridx = ly * bw + (bw - 1)
+      if (!occ[ridx] && !outside[ridx]) { outside[ridx] = 1; stack[top++] = ridx }
+    }
+    var reached = 0
+    while (top > 0) {
+      var cidx = stack[--top]
+      reached++
+      var cxl = cidx % bw, cyl = (cidx / bw) | 0
+      if (cxl > 0) { var w1 = cidx - 1; if (!occ[w1] && !outside[w1]) { outside[w1] = 1; stack[top++] = w1 } }
+      if (cxl < bw - 1) { var e1 = cidx + 1; if (!occ[e1] && !outside[e1]) { outside[e1] = 1; stack[top++] = e1 } }
+      if (cyl > 0) { var n1 = cidx - bw; if (!occ[n1] && !outside[n1]) { outside[n1] = 1; stack[top++] = n1 } }
+      if (cyl < bh - 1) { var s1 = cidx + bw; if (!occ[s1] && !outside[s1]) { outside[s1] = 1; stack[top++] = s1 } }
+    }
+    return size - reached
+  }
+
   return {
     rgbToLab: rgbToLab,
     deltaE76: deltaE76,
     replaceColour: replaceColour,
-    smartFill: smartFill
+    smartFill: smartFill,
+    detectWatermark: detectWatermark
   }
 })

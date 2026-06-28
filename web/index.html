@@ -54,6 +54,15 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
         X-ray
       </button>
+      <!-- Auto-detect (T29 Phase 2): machine watermark detection. Runs edge-detection +
+           connected-components to flag text-shaped regions, then draws a display-only overlay
+           (#detectOverlay) highlighting candidates for the user to confirm. NEVER mutates the
+           image — no fill is applied this slice (confirm→fill lands with T43 routing, #44).
+           app.js manages aria-pressed + the active class (mirrors xrayBtn). -->
+      <button class="btn btn-glass btn-sm" id="detectBtn" type="button" aria-pressed="false" title="Auto-detect watermark text regions (highlights candidates only — doesn't change the image)" aria-label="Toggle auto-detect watermark">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8L19 13M15 9h0M17.8 6.2L19 5M3 21l9-9M12.2 6.2L11 5"/></svg>
+        Auto-detect
+      </button>
       <!-- Region select (T17): toggles drag-to-select mode. Pressed state mirrors
            `selecting`; app.js manages aria-pressed + the active class. -->
       <button class="btn btn-glass btn-sm" id="regionBtn" type="button" aria-pressed="false" title="Limit changes to a selected area">
@@ -80,6 +89,13 @@
 
     <!-- Loaded state: canvas draw surface (T23 renders into this) + hint pill -->
     <canvas class="canvas-surface" id="canvas"></canvas>
+
+    <!-- Auto-detect overlay (T29 Phase 2). A SIBLING of #canvas (not a wrapper), positioned +
+         sized in CSS px by app.js to sit exactly over the canvas — same approach as #regionRect.
+         Backing store matches the image; app.js paints the detected mask tint + bounding boxes.
+         pointer-events:none so picks pass straight through. Display-only: never touches the
+         backing store. Hidden until Auto-detect is toggled on. -->
+    <canvas class="detect-overlay" id="detectOverlay" style="display:none"></canvas>
 
     <!-- Region selection overlay (T17). Positioned + sized in CSS px by app.js to mirror the
          drawn rectangle in image coords. Marching-ants border + a box-shadow that dims

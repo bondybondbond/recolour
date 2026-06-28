@@ -436,4 +436,124 @@ describe('recolour engine', function () {
       })
     })
   })
+
+  describe('detectWatermark (T29 Phase 2)', function () {
+    // Build a solid-colour {data,width,height} buffer, then stamp shapes into it. Far less
+    // verbose than makeGrid for the 20-60px grids the detector needs to exercise.
+    function solid (w, h, rgb) {
+      const data = new Uint8ClampedArray(w * h * 4)
+      for (let i = 0; i < w * h; i++) {
+        data[i * 4] = rgb[0]; data[i * 4 + 1] = rgb[1]; data[i * 4 + 2] = rgb[2]; data[i * 4 + 3] = 255
+      }
+      return { data: data, width: w, height: h }
+    }
+    function rect (img, x0, y0, x1, y1, rgb) {
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const o = (y * img.width + x) * 4
+          img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]
+        }
+      }
+    }
+    // A thin "+" — the canonical text-like shape: low bbox fill-ratio, high perimeter:area.
+    function plus (img, cx, cy, arm, rgb) {
+      rect(img, cx - 1, cy - arm, cx + 1, cy + arm, rgb) // 3px-wide vertical bar
+      rect(img, cx - arm, cy - 1, cx + arm, cy + 1, rgb) // 3px-tall horizontal bar
+    }
+    function maskCount (mask) {
+      let c = 0
+      for (let i = 0; i < mask.length; i++) if (mask[i]) c++
+      return c
+    }
+
+    const WHITE = [255, 255, 255]
+    const BLACK = [0, 0, 0]
+
+    it('detects a thin text-like shape and produces a non-empty mask', () => {
+      const img = solid(24, 24, WHITE)
+      plus(img, 12, 12, 7, BLACK)
+      const { mask, components, confidence } = engine.detectWatermark(img)
+      assert.ok(components.length >= 1, `expected >=1 component, got ${components.length}`)
+      assert.ok(maskCount(mask) > 0, 'mask should flag some pixels')
+      assert.ok(confidence > 0 && confidence <= 1, `confidence out of range: ${confidence}`)
+    })
+
+    it('rejects a solid filled block (hole-fill => high fill-ratio => not text)', () => {
+      const img = solid(24, 24, WHITE)
+      rect(img, 6, 6, 17, 17, BLACK) // 12x12 solid square
+      const { mask, components, confidence } = engine.detectWatermark(img)
+      assert.strictEqual(components.length, 0, 'a solid block must not be classified as text')
+      assert.strictEqual(maskCount(mask), 0)
+      assert.strictEqual(confidence, 0)
+    })
+
+    it('returns nothing on a flat field (no edges)', () => {
+      const img = solid(16, 16, WHITE)
+      const { mask, components, confidence } = engine.detectWatermark(img)
+      assert.strictEqual(components.length, 0)
+      assert.strictEqual(maskCount(mask), 0)
+      assert.strictEqual(confidence, 0)
+    })
+
+    it('honours the region: a shape outside the box is ignored, inside is found', () => {
+      const img = solid(32, 24, WHITE)
+      plus(img, 8, 12, 6, BLACK) // left half
+      // Region over the empty RIGHT half -> nothing.
+      const right = engine.detectWatermark(img, null, { x: 18, y: 0, width: 14, height: 24 })
+      assert.strictEqual(right.components.length, 0, 'shape outside region must be ignored')
+      // Region over the LEFT half (contains the plus) -> found.
+      const left = engine.detectWatermark(img, null, { x: 0, y: 0, width: 16, height: 24 })
+      assert.ok(left.components.length >= 1, 'shape inside region must be detected')
+    })
+
+    it('per-channel Sobel catches an iso-luminant colour-separated shape (luminance would miss)', () => {
+      // bg and fg have near-equal luminance (~129/~131) but large per-channel deltas. A
+      // luminance-only Sobel sees ~3 and finds no edges; max-channel Sobel sees ~255.
+      const BG = [0, 180, 0]
+      const FG = [255, 95, 130]
+      const img = solid(24, 24, BG)
+      plus(img, 12, 12, 7, FG)
+      const { components } = engine.detectWatermark(img)
+      assert.ok(components.length >= 1, 'colour-separated shape must be detected via per-channel Sobel')
+    })
+
+    it('the preContrast path runs and still detects', () => {
+      const img = solid(24, 24, WHITE)
+      plus(img, 12, 12, 7, BLACK)
+      const { components } = engine.detectWatermark(img, { preContrast: true })
+      assert.ok(components.length >= 1, 'preContrast:true must not break detection')
+    })
+
+    it('preContrast:true detects a near-grey watermark that preContrast:false misses', () => {
+      // bg=[128,128,128] fg=[155,155,155]: raw Sobel at edge = 4*(155-128) = 108 < threshold 150
+      // (no detection). After invert+contrast: lut[155]≈83, lut[128]≈126, Sobel = 4*43 = 172
+      // >= 150 (detected). Guards the real-world finding that light/white watermarks on
+      // mid-tone photo backgrounds are invisible to raw Sobel but caught after preContrast.
+      const bg = [128, 128, 128]
+      const fg = [155, 155, 155]
+      const img = solid(24, 24, bg)
+      plus(img, 12, 12, 7, fg)
+      const withoutPC = engine.detectWatermark(img, { preContrast: false })
+      const withPC = engine.detectWatermark(img, { preContrast: true })
+      assert.strictEqual(withoutPC.components.length, 0, 'raw Sobel below threshold — no detection without preContrast')
+      assert.ok(withPC.components.length >= 1, 'invert+contrast amplifies the near-grey edge above threshold')
+    })
+
+    it('confidence is higher for several similar blobs than for a single blob', () => {
+      const single = solid(20, 20, WHITE)
+      plus(single, 10, 10, 6, BLACK)
+      const one = engine.detectWatermark(single)
+
+      const many = solid(64, 16, WHITE)
+      plus(many, 8, 8, 5, BLACK)
+      plus(many, 24, 8, 5, BLACK)
+      plus(many, 40, 8, 5, BLACK)
+      plus(many, 56, 8, 5, BLACK)
+      const four = engine.detectWatermark(many)
+
+      assert.ok(four.components.length > one.components.length, 'should find more blobs')
+      assert.ok(four.confidence > one.confidence, `expected ${four.confidence} > ${one.confidence}`)
+      assert.ok(one.confidence >= 0 && four.confidence <= 1, 'confidence must stay in [0,1]')
+    })
+  })
 })

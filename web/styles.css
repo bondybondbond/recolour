@@ -163,6 +163,16 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
    border is four animated background gradients (one per edge) so an active selection reads
    as live, not a static/disabled dash. pointer-events:none lets picks fall through to the
    canvas; only the clear handle re-enables them. */
+/* Auto-detect overlay (T29 Phase 2). Sibling of #canvas, positioned over it in CSS px by
+   app.js (left/top/width/height mirror the canvas rect, like #regionRect). Backing store is
+   image-resolution; CSS scales it down to the displayed size. Sits above the canvas but below
+   the region overlay (z 6). pointer-events:none so eyedropper picks pass straight through to the
+   canvas. Crisp pixels so the mask tint lines up 1:1 with the image. */
+.detect-overlay {
+  position: absolute; z-index: 5; pointer-events: none;
+  image-rendering: pixelated;
+}
+
 .region-rect {
   position: absolute; z-index: 6; pointer-events: none;
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);

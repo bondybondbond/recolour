@@ -46,6 +46,10 @@
   // X-ray view (T29 Phase 1) — display-only contrast-boost toggle
   var xrayBtn = document.getElementById('xrayBtn')
 
+  // Auto-detect watermark (T29 Phase 2) — display-only candidate overlay
+  var detectBtn = document.getElementById('detectBtn')
+  var detectOverlay = document.getElementById('detectOverlay')
+
   // Region selection (T17)
   var regionBtn = document.getElementById('regionBtn')
   var regionRect = document.getElementById('regionRect')
@@ -101,6 +105,15 @@
   // touch pixels — picks (getImageData), preview, undo and export (toBlob) all read the true backing
   // store — so it is independent of the eyedropper/region interaction modes (no mutual exclusivity).
   var xrayOn = false
+
+  // Auto-detect watermark (T29 Phase 2). Pure display aid: runs the engine's edge-detection +
+  // connected-components pass to flag text-shaped regions, then paints them onto #detectOverlay (a
+  // sibling canvas) as a translucent tint + bounding boxes. Like X-ray it NEVER touches the backing
+  // store — no fill is applied (the confirm→fill step is the future T43 routing slice, #44). So
+  // picks, preview, undo and export are unaffected, and there is no mutual exclusivity with the
+  // eyedropper. The overlay is a one-shot snapshot: it clears on new image / Reset / Undo / commit.
+  var detectOn = false
+  var DETECT_MAX_PIXELS = 4000000 // above this, detection can jank the main thread — warn first (#43)
 
   // Region selection (T17). `region` is the active bounding box in IMAGE pixel coords
   // ({x,y,width,height}) or null for whole-image. `selecting` arms drag-to-draw mode (mutually
@@ -226,6 +239,7 @@
     disarmPicker()
     exitSelecting()
     setXray(false) // a fresh image starts with the normal (un-enhanced) view (T29)
+    setDetect(false) // drop any auto-detect overlay from a previous image (T29 Phase 2)
     resetPickerWell()
     updateControls() // no recolour yet on the new image -> undo + before/after disabled
   }
@@ -935,6 +949,95 @@
     if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setXray(!xrayOn) }
   })
 
+  // Auto-detect watermark (T29 Phase 2). On: run detection on the committed base (honouring any
+  // active region) and paint the candidate overlay; report the count in the canvas-hint pill.
+  // Off: hide the overlay and restore the hint. Display-only — never mutates pixels.
+  function setDetect (on) {
+    detectOn = on
+    detectBtn.classList.toggle('active', on)
+    detectBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    if (!on) {
+      detectOverlay.style.display = 'none'
+      restoreDetectHint()
+      return
+    }
+    if (!baseImageData) { setDetect(false); return }
+    // Large-image guard (#43): detection is synchronous and ~O(W·H). Warn FIRST, then defer one
+    // tick so the notice actually paints before the main thread freezes on the scan.
+    if (canvas.width * canvas.height > DETECT_MAX_PIXELS) {
+      setDetectHint('⏳ Large image — detecting, this may pause briefly…', true)
+      setTimeout(runDetect, 20)
+    } else {
+      runDetect()
+    }
+  }
+
+  function runDetect () {
+    if (!detectOn || !baseImageData) return
+    // edgeThreshold is a starting point — calibrate on real fixtures (see dev-plan open questions).
+    var result = Engine.detectWatermark(baseImageData, { edgeThreshold: 150 }, region)
+    paintDetectOverlay(result)
+    var n = result.components.length
+    if (n > 0) setDetectHint('🔎 Found ' + n + ' candidate region' + (n === 1 ? '' : 's') + ' — highlighted (image unchanged)', false)
+    else setDetectHint('🔎 No watermark-like text regions found', true)
+  }
+
+  // Paint the detected mask (translucent magenta tint) + per-component bounding boxes onto the
+  // overlay canvas at IMAGE resolution, then size/position it over #canvas in CSS px.
+  function paintDetectOverlay (result) {
+    detectOverlay.width = canvas.width
+    detectOverlay.height = canvas.height
+    var octx = detectOverlay.getContext('2d')
+    octx.clearRect(0, 0, canvas.width, canvas.height)
+    var mask = result.mask
+    var tint = octx.createImageData(canvas.width, canvas.height)
+    var td = tint.data
+    for (var i = 0; i < mask.length; i++) {
+      if (mask[i]) { var o = i * 4; td[o] = 255; td[o + 1] = 0; td[o + 2] = 255; td[o + 3] = 130 }
+    }
+    octx.putImageData(tint, 0, 0)
+    octx.strokeStyle = 'rgba(255,0,255,0.95)'
+    octx.lineWidth = Math.max(1, Math.round(canvas.width / 500))
+    for (var c = 0; c < result.components.length; c++) {
+      var b = result.components[c]
+      octx.strokeRect(b.x0 + 0.5, b.y0 + 0.5, (b.x1 - b.x0 + 1) - 1, (b.y1 - b.y0 + 1) - 1)
+    }
+    positionDetectOverlay()
+    detectOverlay.style.display = 'block'
+  }
+
+  // Cover #canvas exactly — same maths as positionRegionOverlay, applied to the whole canvas rect
+  // so the overlay tracks letterboxing, window resize and sidebar scroll.
+  function positionDetectOverlay () {
+    if (!detectOn) return
+    var cRect = canvas.getBoundingClientRect()
+    var aRect = canvasArea.getBoundingClientRect()
+    detectOverlay.style.left = (cRect.left - aRect.left) + 'px'
+    detectOverlay.style.top = (cRect.top - aRect.top) + 'px'
+    detectOverlay.style.width = cRect.width + 'px'
+    detectOverlay.style.height = cRect.height + 'px'
+  }
+
+  // Hint helpers — kept separate from the smartFill warn pill so the two systems don't fight.
+  // warn=true borrows the amber styling (nothing found / heads-up); warn=false is a neutral note.
+  function setDetectHint (msg, warn) {
+    if (!canvasHint) return
+    canvasHint.textContent = msg
+    canvasHint.classList.toggle('warn', !!warn)
+  }
+  function restoreDetectHint () {
+    if (!canvasHint) return
+    canvasHint.textContent = canvasHintDefault
+    canvasHint.classList.remove('warn')
+  }
+
+  detectBtn.addEventListener('click', function () { setDetect(!detectOn) })
+  detectBtn.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setDetect(!detectOn) }
+  })
+  window.addEventListener('resize', function () { if (detectOn) positionDetectOverlay() })
+  sidebar.addEventListener('scroll', function () { if (detectOn) positionDetectOverlay() })
+
   // ---------------------------------------------------------------------------
   // Preview (one-shot, on pick) + reset
   // ---------------------------------------------------------------------------
@@ -997,6 +1100,7 @@
   // Bake the current live preview into the committed base, pushing the old base onto
   // the undo stack. No-op when no colour is picked (nothing live to commit).
   function commitOperation () {
+    if (detectOn) setDetect(false) // an edit invalidates the auto-detect snapshot (T29 Phase 2)
     if (!targetRgb) return
     undoStack.push(baseImageData)
     if (undoStack.length > MAX_UNDO) undoStack.shift() // push first, then drop oldest
@@ -1010,6 +1114,7 @@
   function undo () {
     if (!originalImageData) return
     cancelScheduledPreview() // drop any frame queued from a mid-drag slider move
+    if (detectOn) setDetect(false) // the overlay is stale once the canvas content changes (T29 Phase 2)
     if (targetRgb) {
       // Discard the live, uncommitted op -> repaint the committed base.
       targetRgb = null
@@ -1074,6 +1179,7 @@
     disarmPicker()
     exitSelecting()
     setXray(false) // Reset returns to the normal (un-enhanced) view (T29)
+    setDetect(false) // clear any auto-detect overlay (T29 Phase 2)
     resetPickerWell()
     updateControls() // back to the original -> undo + before/after disabled
   })

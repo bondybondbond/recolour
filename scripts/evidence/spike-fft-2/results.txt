@@ -1,0 +1,117 @@
+Tiling-detection SPIKE 2 (#49) — pre-processing for SNR lift — 2026-06-28T21:23:09.357Z
+window=512  LAG_MIN=10  LAG_MAX=200  PEAK_FACTOR=6
+preprocess: RBIG=48  RMED=16  BLUR_PASSES=3  (detection thresholds frozen at Spike 1 values)
+
+=== CTRL+ TAYLOR GALE bold tiling  (900x600, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      4.05x      7      7    11px  TILING (fund ~11px, 7-peak comb)
+        highpass     11.31x      6      6    11px  TILING (fund ~11px, 6-peak comb)
+    highpass+lcn      8.65x      7      7    11px  TILING (fund ~11px, 7-peak comb)
+      hp+lcn+log      9.01x      6      6    11px  TILING (fund ~11px, 6-peak comb)
+
+=== CTRL+ @Watermark diagonal tiling  (1092x852, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      3.01x      5      5    87px  TILING (fund ~87px, 5-peak comb)
+        highpass      3.47x      2      2    67px  MARGINAL (2-peak @ ~67px, top 3.5x)
+    highpass+lcn      5.22x      3      4    39px  MARGINAL (4-peak @ ~39px, top 5.2x)
+      hp+lcn+log      6.44x      1      1    65px  JPEG-only (8px grid 21.8x)
+
+=== CTRL+ "Delete me" dense tiling  (1197x652, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      6.66x      6      6    12px  TILING (fund ~12px, 6-peak comb)
+        highpass     16.35x      6      6    12px  TILING (fund ~12px, 6-peak comb)
+    highpass+lcn     10.86x      6      6    12px  TILING (fund ~12px, 6-peak comb)
+      hp+lcn+log     16.82x      6      6    12px  TILING (fund ~12px, 6-peak comb)
+
+=== CTRL- flying-eagle photo (no watermark)  (7680x4320, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none     -1.32x      0      0     0px  JPEG-only (8px grid 7.0x)
+        highpass      3.88x      2      2    61px  MARGINAL (2-peak @ ~61px, top 3.9x)
+    highpass+lcn      1.60x      0      0     0px  JPEG-only (8px grid 18.3x)
+      hp+lcn+log      7.44x      2      2    54px  MARGINAL (2-peak @ ~54px, top 7.4x)
+
+=== CTRL- single Copyright watermark on photo  (800x533, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      0.00x      0      0     0px  NONE (comb 0, weak 0, jpeg 4.9x)
+        highpass      1.67x      0      0     0px  JPEG-only (8px grid 13.4x)
+    highpass+lcn     13.23x      2      3    25px  MARGINAL (3-peak @ ~25px, top 13.2x)
+      hp+lcn+log      5.95x      1      1   104px  JPEG-only (8px grid 20.8x)
+
+=== REF watermark.jpg (Lorem doc text lines)  (828x1171, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none     19.05x      4      4    10px  JPEG-only (8px grid 12.6x)
+        highpass     18.44x      4      4    10px  JPEG-only (8px grid 11.6x)
+    highpass+lcn     18.96x      3      3    10px  JPEG-only (8px grid 11.9x)
+      hp+lcn+log     27.11x      3      3    10px  JPEG-only (8px grid 10.9x)
+
+=== TARGET WhatsApp .19  (840x560, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      2.80x      1      2    66px  MARGINAL (2-peak @ ~33px, top 2.8x)
+        highpass     12.49x      2      2    67px  MARGINAL (2-peak @ ~67px, top 12.5x)
+    highpass+lcn     11.33x      3      3    67px  MARGINAL (3-peak @ ~67px, top 11.3x)
+      hp+lcn+log     10.80x      5      5    67px  TILING (fund ~67px, 5-peak comb)
+
+=== TARGET WhatsApp .50  (840x560, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      2.64x      1      1    64px  NONE (comb 1, weak 1, jpeg 3.9x)
+        highpass      9.00x      3      3    66px  MARGINAL (3-peak @ ~66px, top 9.0x)
+    highpass+lcn      9.16x      3      3    66px  MARGINAL (3-peak @ ~66px, top 9.2x)
+      hp+lcn+log     10.76x     10     10    66px  TILING (fund ~66px, 10-peak comb)
+
+=== TARGET kids1 (non-WhatsApp source)  (840x560, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      2.80x      1      2    66px  MARGINAL (2-peak @ ~33px, top 2.8x)
+        highpass     12.46x      2      2    67px  MARGINAL (2-peak @ ~67px, top 12.5x)
+    highpass+lcn     11.32x      3      3    67px  MARGINAL (3-peak @ ~67px, top 11.3x)
+      hp+lcn+log     10.84x      5      5    67px  TILING (fund ~67px, 5-peak comb)
+
+=== TARGET kids2 (non-WhatsApp source)  (840x560, window 512) ===
+          config  top/floor   comb   weak    fund  verdict
+            none      2.64x      1      1    64px  NONE (comb 1, weak 1, jpeg 3.9x)
+        highpass      8.98x      3      3    66px  MARGINAL (3-peak @ ~66px, top 9.0x)
+    highpass+lcn      9.14x      3      3    66px  MARGINAL (3-peak @ ~66px, top 9.1x)
+      hp+lcn+log     10.74x     10     10    66px  TILING (fund ~66px, 10-peak comb)
+
+=== CONFIG VALIDITY (negatives must not produce a clean comb) ===
+            none  VALID
+        highpass  VALID
+    highpass+lcn  VALID
+      hp+lcn+log  VALID
+
+=== CONTROL HEALTH (caveats, not gates) ===
+          config    tile+ TILING   notile- clean  notile- drift
+            none             3/3             2/2  none
+        highpass             2/3             2/2  ->MARGINAL ctrl-notile(61px,3.9x)   [pos regressed: ctrl-tiled2]
+    highpass+lcn             2/3             2/2  ->MARGINAL ctrl-single(25px,13.2x)   [pos regressed: ctrl-tiled2]
+      hp+lcn+log             2/3             2/2  ->MARGINAL ctrl-notile(54px,7.4x)   [pos regressed: ctrl-tiled2]
+
+=== LCN TEXT-HARMONIC DIAGNOSTIC (ctrl-single under highpass+lcn) ===
+  ctrl-single fired MARGINAL @ ~25px under highpass+lcn.
+  lag is OUTSIDE the character-spacing window -> not the classic LCN text harmonic; investigate separately.
+
+=== TARGET LIFT (best valid config vs baseline) ===
+        target   baseline       best          config     lift  comb/verdict
+   whatsapp-19      2.80x     10.80x      hp+lcn+log    +8.00  5-peak TILING
+   whatsapp-50      2.64x     10.76x      hp+lcn+log    +8.12  10-peak TILING
+         kids1      2.80x     10.84x      hp+lcn+log    +8.03  5-peak TILING
+         kids2      2.64x     10.74x      hp+lcn+log    +8.10  10-peak TILING
+
+=== GO / NO-GO ===
+  valid configs (negatives stay non-tiling): none, highpass, highpass+lcn, hp+lcn+log
+  WhatsApp best top-ratios: .19=10.80x (hp+lcn+log)  .50=10.76x (hp+lcn+log)   baseline 2.6-2.8x
+  kids cross-check:        kids1=10.84x  kids2=10.74x  (840x560/~199KB, non-WhatsApp source — IDENTICAL numbers confirm transport is NOT the limiter)
+  DECISION: GO — both WhatsApp targets clear >= 3.5x under a valid config (min 10.76x) AND both reach a clean multi-peak TILING comb. Pre-processing lifts the watermark periodicity out of the photo-texture floor. Proceed to a detectTiling() engine build — see caveats below for the engine design constraints.
+
+=== CAVEATS / ENGINE DESIGN CONSTRAINTS (for the build, if GO) ===
+  1. Discriminate on COMB COUNT, not top-ratio. Pre-processing inflates top-ratio for
+     everything, including clean-photo negatives (eagle -> MARGINAL ~7x under hp+lcn+log).
+     The clean >=4-peak collinear comb is what still separates targets from negatives.
+  2. High-pass radius interacts with tile period. RBIG=48 attenuated the large ~87px
+     diagonal @Watermark positive control (ctrl-tiled2 regressed from TILING to MARGINAL/JPEG).
+     A real engine needs a high-pass scale >= the expected tile period, or multi-scale analysis,
+     or it will MISS large-period tilings. The small/medium-period tilings (~11-67px: TAYLOR,
+     Delete-me, and the actual WhatsApp targets) all survive and are strongly boosted.
+  3. log1p helps: hp+lcn+log gave the cleanest target combs (5- and 10-peak vs 2-3 without log).
+
+Evidence (PNGs + this log) written to: C:\apps\recolour\scripts\evidence\spike-fft-2
+Spike 1 evidence (scripts/evidence/spike-fft/) left untouched.

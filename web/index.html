@@ -46,6 +46,14 @@
          Hidden until an image is loaded; button stays disabled until a colour is
          picked (T24, gated by app.js on targetRgb). -->
     <div class="canvas-toolbar">
+      <!-- X-ray view (T29 Phase 1): display-only contrast boost to reveal faint /
+           semi-transparent watermarks for picking. CSS `filter` on the canvas element —
+           never bakes into pixels, so picks/exports read the true image. app.js manages
+           aria-pressed + the active class (mirrors regionBtn). -->
+      <button class="btn btn-glass btn-sm" id="xrayBtn" type="button" aria-pressed="false" title="X-ray view — reveal faint watermarks for picking (display only, doesn't change the image)" aria-label="Toggle X-ray view">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+        X-ray
+      </button>
       <!-- Region select (T17): toggles drag-to-select mode. Pressed state mirrors
            `selecting`; app.js manages aria-pressed + the active class. -->
       <button class="btn btn-glass btn-sm" id="regionBtn" type="button" aria-pressed="false" title="Limit changes to a selected area">

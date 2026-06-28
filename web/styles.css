@@ -50,6 +50,18 @@ header { padding: 12px 20px; background: var(--surface); border-bottom: 1px soli
    prerequisite for accurate eyedropper / region-drag / resize-handle coordinates (#33). */
 .canvas-surface { max-width: calc(100% - 40px); max-height: calc(100% - 40px); width: auto; height: auto; aspect-ratio: 4 / 3; border-radius: var(--radius); cursor: crosshair; display: none; background: var(--surface2); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); object-fit: contain; }
 .app.loaded .canvas-surface { display: block; aspect-ratio: auto; }
+/* X-ray view (T29 Phase 1): display-only enhancement so faint / semi-transparent watermarks become
+   visible to pick. `invert(1) contrast(1.6)` is the chosen recipe: QA on the real fixtures showed a
+   mid-grey-pivoted contrast boost (the original contrast(2.5) saturate(1.4) plan) pushes a faint
+   light-on-white watermark TOWARDS white — making it LESS visible than no filter. Inverting maps the
+   white background to black so the faint text separates legibly (the genuine "X-ray" look). Colours
+   flip, but this is a selection aid — the loupe still shows the true colour for the actual pick.
+   CSS `filter` is a render-stage effect — it never touches the canvas backing store, so the
+   eyedropper (getImageData) and export (toBlob) read the true image. MUST be on the canvas element,
+   NOT a wrapper: #regionRect is a SIBLING of #canvas inside .canvas-area, so an element-scoped filter
+   cannot reach the marching-ants overlay. NEVER set ctx.filter in app.js — that bakes the effect into
+   the pixels. will-change hints the compositor for a smooth toggle. */
+.canvas-surface.xray { filter: invert(1) contrast(1.6); will-change: filter; }
 /* Eyedropper armed: hide the system cursor — the centred loupe IS the cursor (T27). */
 .app.picking .canvas-surface { cursor: none; }
 /* Drag-over while an image is already loaded: outline the canvas area. */

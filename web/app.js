@@ -43,6 +43,9 @@
   var canvasHint = document.querySelector('.canvas-hint')
   var canvasHintDefault = canvasHint ? canvasHint.textContent : ''
 
+  // X-ray view (T29 Phase 1) — display-only contrast-boost toggle
+  var xrayBtn = document.getElementById('xrayBtn')
+
   // Region selection (T17)
   var regionBtn = document.getElementById('regionBtn')
   var regionRect = document.getElementById('regionRect')
@@ -92,6 +95,12 @@
   // each of the 4 cardinal directions, weighted by 1/distance. The Panel 2 swatches are
   // dimmed + disabled while it's active because the flat colour is not used.
   var smartFillOn = false
+
+  // X-ray view (T29 Phase 1). Pure display aid: when on, a CSS `filter` on the canvas element
+  // boosts contrast so faint / semi-transparent watermarks are visible to eyedropper. It does NOT
+  // touch pixels — picks (getImageData), preview, undo and export (toBlob) all read the true backing
+  // store — so it is independent of the eyedropper/region interaction modes (no mutual exclusivity).
+  var xrayOn = false
 
   // Region selection (T17). `region` is the active bounding box in IMAGE pixel coords
   // ({x,y,width,height}) or null for whole-image. `selecting` arms drag-to-draw mode (mutually
@@ -216,6 +225,7 @@
     regionRect.style.display = 'none'
     disarmPicker()
     exitSelecting()
+    setXray(false) // a fresh image starts with the normal (un-enhanced) view (T29)
     resetPickerWell()
     updateControls() // no recolour yet on the new image -> undo + before/after disabled
   }
@@ -911,6 +921,20 @@
     }
   })
 
+  // X-ray view toggle (T29 Phase 1). Adds/removes the `.xray` class on the canvas (a CSS-only
+  // contrast filter) and mirrors the pressed state on the glass button. Display-only: nothing else
+  // in the pipeline reads the rendered output, so no renderPreview()/commit is needed.
+  function setXray (on) {
+    xrayOn = on
+    canvas.classList.toggle('xray', on)
+    xrayBtn.classList.toggle('active', on)
+    xrayBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+  }
+  xrayBtn.addEventListener('click', function () { setXray(!xrayOn) })
+  xrayBtn.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setXray(!xrayOn) }
+  })
+
   // ---------------------------------------------------------------------------
   // Preview (one-shot, on pick) + reset
   // ---------------------------------------------------------------------------
@@ -1049,6 +1073,7 @@
     regionRect.style.display = 'none'
     disarmPicker()
     exitSelecting()
+    setXray(false) // Reset returns to the normal (un-enhanced) view (T29)
     resetPickerWell()
     updateControls() // back to the original -> undo + before/after disabled
   })

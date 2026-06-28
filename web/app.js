@@ -115,6 +115,7 @@
   var MAG_RADIUS = 4           // 4 px each side of centre -> 9x9 grid
   var MAG_ZOOM = 14            // on-screen px per source px
   var MAG_PX = (MAG_RADIUS * 2 + 1) * MAG_ZOOM // 126px square
+  var MAG_BORDER = 2           // .magnifier border width (px, each side) — see styles.css
   var magCanvas = null
   var magCtx = null
 
@@ -311,8 +312,9 @@
     return [d[i], d[i + 1], d[i + 2], d[i + 3]]
   }
 
-  // Draw the 9x9 neighbourhood around (cx,cy) into the floating loupe, zoomed,
-  // with a pixel grid and crosshair on the centre cell.
+  // Draw the 9x9 neighbourhood around (cx,cy) into the loupe, zoomed, with a pixel grid and
+  // crosshair on the centre cell. The loupe is centred on the cursor (T27) — the system cursor
+  // is hidden while picking, so the centre crosshair cell IS the pixel that will be picked.
   function drawMagnifier (e, cx, cy) {
     magCtx.clearRect(0, 0, MAG_PX, MAG_PX)
     // Read from the live preview when one is active so the loupe shows in-progress results
@@ -351,17 +353,18 @@
     magCtx.lineWidth = 1.5
     magCtx.strokeRect(MAG_RADIUS * MAG_ZOOM + 0.5, MAG_RADIUS * MAG_ZOOM + 0.5, MAG_ZOOM - 1, MAG_ZOOM - 1)
 
-    // Position: above-right of the cursor by default so the work area stays visible.
-    // Falls back to below-right if not enough space above; flips left if near right edge.
+    // Position: centred exactly on the cursor (T27) so the centre crosshair cell sits on the
+    // pixel that will be picked. cx2/cy2 are .canvas-area-relative — the same space magCanvas is
+    // absolutely positioned in. The loupe clips at the area edges (overflow:hidden) near borders;
+    // that's the accepted cursor-as-loupe trade-off (no offset, no edge-flip).
+    // Centre by half the rendered box, not half the backing store: the .magnifier has a 2px
+    // border each side, so the rendered box is MAG_PX + 2*MAG_BORDER. Subtracting MAG_BORDER
+    // lands the geometric centre exactly on the cursor.
     var rect = canvasArea.getBoundingClientRect()
     var cx2 = e.clientX - rect.left
     var cy2 = e.clientY - rect.top
-    var left = cx2 + 18
-    var top = cy2 - MAG_PX - 18          // prefer above cursor
-    if (top < 0) top = cy2 + 18           // fall below if too close to top
-    if (left + MAG_PX > rect.width) left = cx2 - MAG_PX - 18  // flip left if near right edge
-    magCanvas.style.left = left + 'px'
-    magCanvas.style.top = top + 'px'
+    magCanvas.style.left = (cx2 - MAG_PX / 2 - MAG_BORDER) + 'px'
+    magCanvas.style.top = (cy2 - MAG_PX / 2 - MAG_BORDER) + 'px'
     magCanvas.style.display = 'block'
   }
 

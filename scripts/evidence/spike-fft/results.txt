@@ -1,0 +1,127 @@
+Tiling-detection SPIKE (#48), autocorrelation method — 2026-06-28T20:37:27.134Z
+window=512  LAG_MIN=10  LAG_MAX=200  PEAK_FACTOR=6
+
+=== CONTROL+ repeated-tile-template.jpg "TAYLOR GALE" bold tiling (MUST tile)  (900x600, window 512) ===
+AC noise floor (annulus median |ac|): 2.02e-1
+top autocorrelation peaks (lag px -> ratio peak/floor):
+  lag(  11,   1)  |lag|=11px  ratio=4.05
+  lag(  24,   1)  |lag|=24px  ratio=3.71
+  lag(  32,   1)  |lag|=32px  ratio=3.68
+  lag(  43,   1)  |lag|=43px  ratio=3.37
+  lag(  56,   3)  |lag|=56px  ratio=3.13
+  lag(  66,   8)  |lag|=66px  ratio=3.00
+  lag(  78,  15)  |lag|=79px  ratio=2.70
+  lag(  91,  15)  |lag|=92px  ratio=2.55
+  lag( 124,  14)  |lag|=125px  ratio=2.05
+  lag( 135,  13)  |lag|=136px  ratio=1.92
+  lag( 146,  19)  |lag|=147px  ratio=1.79
+  lag( 190,  18)  |lag|=191px  ratio=1.42
+JPEG 8px-block autocorrelation strength @ lag 8: ratio=4.41
+harmonic comb: 7 collinear k*fundamental peaks (>=2.5x floor), fundamental lag ~11px  |  weak (>=2.0x): 7 @ ~11px
+VERDICT: TILING PRESENT (fundamental ~11px, 7-peak comb) -> BUILD candidate
+  evidence: ctrl-tiled-spectrum.png, ctrl-tiled-autocorr.png
+
+=== CONTROL+ banner-before.jpg "@Watermark" diagonal tiling (MUST tile)  (1092x852, window 512) ===
+AC noise floor (annulus median |ac|): 4.94e-2
+top autocorrelation peaks (lag px -> ratio peak/floor):
+  lag( 124,  33)  |lag|=128px  ratio=3.01
+  lag( 116,  38)  |lag|=122px  ratio=2.92
+  lag( 115,  36)  |lag|=121px  ratio=2.92
+  lag( 109,  27)  |lag|=112px  ratio=2.80
+  lag(  75,  54)  |lag|=92px  ratio=2.78
+  lag(  97,  37)  |lag|=104px  ratio=2.77
+  lag(  73,  48)  |lag|=87px  ratio=2.77
+  lag(  78,  46)  |lag|=91px  ratio=2.76
+  lag(  80,  53)  |lag|=96px  ratio=2.76
+  lag( 100,  41)  |lag|=108px  ratio=2.74
+  lag( 113,  19)  |lag|=115px  ratio=2.72
+  lag( 113,  23)  |lag|=115px  ratio=2.71
+JPEG 8px-block autocorrelation strength @ lag 8: ratio=14.50
+harmonic comb: 5 collinear k*fundamental peaks (>=2.5x floor), fundamental lag ~87px  |  weak (>=2.0x): 5 @ ~87px
+VERDICT: TILING PRESENT (fundamental ~87px, 5-peak comb) -> BUILD candidate
+  evidence: ctrl-tiled2-spectrum.png, ctrl-tiled2-autocorr.png
+
+=== CONTROL- flying-eagle photo, no watermark (MUST NOT tile)  (7680x4320, window 512) ===
+AC noise floor (annulus median |ac|): 1.36e-1
+top autocorrelation peaks (lag px -> ratio peak/floor):
+  lag( -72, 168)  |lag|=183px  ratio=-1.32
+JPEG 8px-block autocorrelation strength @ lag 8: ratio=6.97
+harmonic comb: 0 collinear k*fundamental peaks (>=2.5x floor)  |  weak (>=2.0x): 0
+VERDICT: NO watermark tiling; only periodicity is the ~8px JPEG block grid (jpeg=7.0x)
+  evidence: ctrl-notile-spectrum.png, ctrl-notile-autocorr.png
+
+=== REF watermark.jpg (Lorem doc: text-line periodicity is real)  (828x1171, window 512) ===
+AC noise floor (annulus median |ac|): 3.69e-2
+top autocorrelation peaks (lag px -> ratio peak/floor):
+  lag(   0,  98)  |lag|=98px  ratio=19.05
+  lag(  10,   0)  |lag|=10px  ratio=12.92
+  lag(  15,   0)  |lag|=15px  ratio=11.82
+  lag(  24,   0)  |lag|=24px  ratio=11.30
+  lag(  19,   0)  |lag|=19px  ratio=11.13
+  lag(  29,   0)  |lag|=29px  ratio=10.71
+  lag(  34,   0)  |lag|=34px  ratio=10.52
+  lag(  58,   0)  |lag|=58px  ratio=10.30
+  lag(  39,   0)  |lag|=39px  ratio=10.26
+  lag(   5,  98)  |lag|=98px  ratio=10.20
+  lag(  -5,  98)  |lag|=98px  ratio=10.20
+  lag(  44,   0)  |lag|=44px  ratio=10.13
+JPEG 8px-block autocorrelation strength @ lag 8: ratio=12.62
+harmonic comb: 4 collinear k*fundamental peaks (>=2.5x floor), fundamental lag ~10px  |  weak (>=2.0x): 4 @ ~10px
+VERDICT: NO watermark tiling; only periodicity is the ~8px JPEG block grid (jpeg=12.6x)
+  evidence: ref-textdoc-spectrum.png, ref-textdoc-autocorr.png
+
+=== WhatsApp .19 (real target)  (840x560, window 512) ===
+AC noise floor (annulus median |ac|): 2.00e-1
+top autocorrelation peaks (lag px -> ratio peak/floor):
+  lag(  66,   0)  |lag|=66px  ratio=2.80
+  lag(  33,   0)  |lag|=33px  ratio=2.31
+  lag(  40,   0)  |lag|=40px  ratio=2.30
+  lag( -36,  21)  |lag|=42px  ratio=2.12
+  lag( -36,  37)  |lag|=52px  ratio=2.06
+  lag(  35,  36)  |lag|=50px  ratio=2.04
+  lag( -35,  59)  |lag|=69px  ratio=2.01
+  lag(  39,  60)  |lag|=72px  ratio=1.96
+  lag(  50,  36)  |lag|=62px  ratio=1.95
+  lag(  -9,  59)  |lag|=60px  ratio=1.94
+  lag(-132,   1)  |lag|=132px  ratio=1.91
+  lag( 133,  12)  |lag|=134px  ratio=1.72
+JPEG 8px-block autocorrelation strength @ lag 8: ratio=3.90
+harmonic comb: 1 collinear k*fundamental peaks (>=2.5x floor), fundamental lag ~66px  |  weak (>=2.0x): 2 @ ~33px
+VERDICT: MARGINAL — faint 2-peak comb @ ~33px at the noise floor (top peak only 2.8x vs ~4x for the clean controls). Not separable as-is; pre-processing spike needed.
+  evidence: whatsapp-19-spectrum.png, whatsapp-19-autocorr.png
+
+=== WhatsApp .50 (real target)  (840x560, window 512) ===
+AC noise floor (annulus median |ac|): 1.97e-1
+top autocorrelation peaks (lag px -> ratio peak/floor):
+  lag(  64,   0)  |lag|=64px  ratio=2.64
+  lag(-128,   1)  |lag|=128px  ratio=1.90
+  lag(  33,  57)  |lag|=66px  ratio=1.88
+  lag( -34,  50)  |lag|=60px  ratio=1.82
+  lag( -33,  61)  |lag|=69px  ratio=1.82
+  lag(  86,  36)  |lag|=93px  ratio=1.76
+  lag(-108,  21)  |lag|=110px  ratio=1.56
+  lag( 101,  72)  |lag|=124px  ratio=1.42
+  lag( -93,  60)  |lag|=111px  ratio=1.36
+  lag( -99,  49)  |lag|=110px  ratio=1.34
+  lag(  -7,  96)  |lag|=96px  ratio=1.20
+  lag(  -4,  97)  |lag|=97px  ratio=1.20
+JPEG 8px-block autocorrelation strength @ lag 8: ratio=3.89
+harmonic comb: 1 collinear k*fundamental peaks (>=2.5x floor), fundamental lag ~64px  |  weak (>=2.0x): 1 @ ~64px
+VERDICT: NO periodic tiling signal (comb 1, weak 1, jpeg 3.9x)
+  evidence: whatsapp-50-spectrum.png, whatsapp-50-autocorr.png
+
+=== SUMMARY ===
+  CONTROL+ repeated-tile-template.jpg "TAYLOR GALE" bold tiling (MUST tile)
+      -> TILING PRESENT (fundamental ~11px, 7-peak comb) -> BUILD candidate
+  CONTROL+ banner-before.jpg "@Watermark" diagonal tiling (MUST tile)
+      -> TILING PRESENT (fundamental ~87px, 5-peak comb) -> BUILD candidate
+  CONTROL- flying-eagle photo, no watermark (MUST NOT tile)
+      -> NO watermark tiling; only periodicity is the ~8px JPEG block grid (jpeg=7.0x)
+  REF watermark.jpg (Lorem doc: text-line periodicity is real)
+      -> NO watermark tiling; only periodicity is the ~8px JPEG block grid (jpeg=12.6x)
+  WhatsApp .19 (real target)
+      -> MARGINAL — faint 2-peak comb @ ~33px at the noise floor (top peak only 2.8x vs ~4x for the clean controls). Not separable as-is; pre-processing spike needed.
+  WhatsApp .50 (real target)
+      -> NO periodic tiling signal (comb 1, weak 1, jpeg 3.9x)
+
+Evidence (PNGs + this log) written to: C:\apps\recolour\scripts\evidence\spike-fft

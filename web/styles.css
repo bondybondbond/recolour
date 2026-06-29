@@ -173,6 +173,39 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   image-rendering: pixelated;
 }
 
+/* Tile-fill propagation overlay (T29 Phase 3, #52). Same sibling-over-canvas approach as
+   .detect-overlay — image-resolution backing store, CSS-scaled, below the region overlay (z 6),
+   pointer-events:none so eyedropper picks pass straight through. app.js paints a translucent cyan
+   tint (distinct from auto-detect's magenta). */
+.tile-overlay {
+  position: absolute; z-index: 5; pointer-events: none;
+  image-rendering: pixelated;
+}
+
+/* Tile-fill confirm card (T29 Phase 3, #52). Floats bottom-centre over the canvas like
+   .canvas-hint but interactive (pointer-events:auto) and stacked vertically: count + confidence
+   band row, optional subharmonic chip, then the Accept / Cancel actions. */
+.tile-confirm {
+  position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 7; display: flex; flex-direction: column; gap: 10px; align-items: stretch;
+  min-width: 240px; max-width: 340px;
+  background: rgba(0, 0, 0, 0.78); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 14px; backdrop-filter: blur(12px); pointer-events: auto;
+}
+.tile-confirm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tile-count { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.tile-band { font-size: 11px; color: var(--muted); text-align: right; }
+/* Confidence band at/below the detection gate (combCount <= 5) — same amber as the #31 hint. */
+.tile-band.warn { color: #ffb454; }
+/* Subharmonic recovery chip — amber, full-width, actionable. Disabled = non-actionable fallback. */
+.tile-subchip {
+  font-size: 12px; color: #ffb454; background: rgba(40, 20, 0, 0.8);
+  border: 1px solid #ffb454; border-radius: 8px; padding: 6px 10px; cursor: pointer;
+  text-align: left; width: 100%; line-height: 1.3;
+}
+.tile-subchip:hover:not(:disabled) { background: rgba(60, 32, 0, 0.9); }
+.tile-subchip:disabled { cursor: default; opacity: 0.7; }
+
 .region-rect {
   position: absolute; z-index: 6; pointer-events: none;
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);

@@ -69,6 +69,14 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3 3"><rect x="3" y="3" width="18" height="18" rx="1"/></svg>
         Select area
       </button>
+      <!-- Tile-fill (T29 Phase 3, #52): box ONE watermark instance with Select area, then this
+           detects the tiling lattice (detectTiling) and propagates the seed shape to every lattice
+           position (propagateMask), shows a confirm overlay, and on Accept inpaints them all in one
+           undoable op (fillMaskRegion). app.js manages aria-pressed + the active class. -->
+      <button class="btn btn-glass btn-sm" id="tileBtn" type="button" aria-pressed="false" title="Tile-fill — box one watermark instance first, then remove every repeated copy across the image" aria-label="Toggle tile-fill propagation">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Tile-fill
+      </button>
       <button class="btn btn-glass btn-sm" id="baBtn" disabled>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
         Before / After
@@ -97,6 +105,12 @@
          backing store. Hidden until Auto-detect is toggled on. -->
     <canvas class="detect-overlay" id="detectOverlay" style="display:none"></canvas>
 
+    <!-- Tile-fill propagation overlay (T29 Phase 3, #52). A SIBLING of #canvas like #detectOverlay,
+         positioned + sized in CSS px by app.js. app.js paints the propagated union mask as a
+         translucent cyan tint (distinct from auto-detect's magenta). pointer-events:none so picks
+         pass through. Display-only until the user Accepts. Hidden until Tile-fill runs. -->
+    <canvas class="tile-overlay" id="tileOverlay" style="display:none"></canvas>
+
     <!-- Region selection overlay (T17). Positioned + sized in CSS px by app.js to mirror the
          drawn rectangle in image coords. Marching-ants border + a box-shadow that dims
          everything outside it. pointer-events: none so picks pass through; the clear (×)
@@ -117,6 +131,22 @@
     </div>
 
     <div class="canvas-hint">👆 Click image, then use the eyedropper to pick a colour</div>
+
+    <!-- Tile-fill confirm card (T29 Phase 3, #52). Shown by app.js after propagation runs: an
+         instance-count pill, a confidence band (combCount-driven; amber at/below the detection
+         gate), an optional subharmonic recovery chip ("double the spacing"), and Accept / Cancel.
+         pointer-events:auto so its controls are clickable over the canvas. Hidden by default. -->
+    <div class="tile-confirm" id="tileConfirm" style="display:none">
+      <div class="tile-confirm-row">
+        <span class="tile-count" id="tileCount">Found 0 instances</span>
+        <span class="tile-band" id="tileBand"></span>
+      </div>
+      <button class="tile-subchip" id="tileSubchip" type="button" style="display:none"></button>
+      <div class="picker-actions">
+        <button class="btn btn-ghost btn-sm" id="tileCancel" type="button">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="tileAccept" type="button">Fill all</button>
+      </div>
+    </div>
   </div>
 
   <!-- Sidebar (disabled until an image is loaded) -->

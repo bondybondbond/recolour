@@ -865,4 +865,116 @@ describe('recolour engine', function () {
       assert.strictEqual(prop.mask[(sy + 2 * pitch) * N + sx], 1, 'two rows down is covered')
     })
   })
+
+  // fillMaskRegion (#52) — inpaint an arbitrary supplied mask, reusing smartFill's dilation + #31
+  // guard + BFS geodesic core. The parity test is the regression gate for the Step-1 extraction:
+  // a mask equal to smartFill's colour-match mask must reconstruct byte-identical pixels.
+  describe('fillMaskRegion (#52)', function () {
+    const T = [200, 0, 0] // "watermark" colour to remove
+    const A = [0, 100, 0] // background
+
+    // Mark every pixel exactly equal to `colour` in a {data,width,height} buffer.
+    function colourMask (img, colour) {
+      const m = new Uint8Array(img.width * img.height)
+      for (let p = 0; p < m.length; p++) {
+        const o = p * 4
+        if (img.data[o] === colour[0] && img.data[o + 1] === colour[1] && img.data[o + 2] === colour[2]) m[p] = 1
+      }
+      return m
+    }
+
+    it('reconstructs a supplied shape mask from the surrounding background (unfilled 0)', () => {
+      const img = makeGrid([
+        [A, A, A, A, A],
+        [A, T, T, T, A],
+        [A, T, T, T, A],
+        [A, T, T, T, A],
+        [A, A, A, A, A]
+      ])
+      const r = engine.fillMaskRegion(img, colourMask(img, T))
+      assert.strictEqual(r.unfilled, 0)
+      assert.strictEqual(r.filled, 9, 'all 9 masked pixels reconstructed')
+      assert.deepStrictEqual(pixelAt(img, 2, 2).slice(0, 3), A, 'centre reconstructed from background')
+    })
+
+    it('is byte-identical to smartFill given smartFill\'s colour-match mask (extraction parity)', () => {
+      const rows = [
+        [A, A, A, A, A],
+        [A, T, T, T, A],
+        [A, T, A, T, A],
+        [A, T, T, T, A],
+        [A, A, A, A, A]
+      ]
+      const viaSmart = makeGrid(rows)
+      const viaMask = makeGrid(rows)
+      engine.smartFill(viaSmart, T, 0) // tol 0 -> matches exactly the T pixels
+      engine.fillMaskRegion(viaMask, colourMask(viaMask, T))
+      assert.deepStrictEqual(Array.from(viaMask.data), Array.from(viaSmart.data))
+    })
+
+    it('honours dilate: expands the fill set so an anti-aliased fringe is reconstructed', () => {
+      const B = [0, 0, 100]   // 1px fringe ring (NOT in the mask)
+      const C = [100, 0, 100] // true background just outside the fringe
+      const grid = () => makeGrid([
+        [A, A, A, A, A, A, A],
+        [A, C, C, C, C, C, A],
+        [A, C, B, B, B, C, A],
+        [A, C, B, T, B, C, A],
+        [A, C, B, B, B, C, A],
+        [A, C, C, C, C, C, A],
+        [A, A, A, A, A, A, A]
+      ])
+      const noDil = grid()
+      const r0 = engine.fillMaskRegion(noDil, colourMask(noDil, T))
+      assert.strictEqual(r0.filled, 1)
+      assert.deepStrictEqual(pixelAt(noDil, 3, 3).slice(0, 3), B, 'no dilation -> centre takes the fringe (halo)')
+
+      const dil = grid()
+      const r1 = engine.fillMaskRegion(dil, colourMask(dil, T), { dilate: 1 })
+      assert.ok(r1.filled > 1, 'dilation pulls the fringe ring into the fill set')
+      assert.deepStrictEqual(pixelAt(dil, 3, 3).slice(0, 3), C, 'centre now samples past the fringe')
+      assert.deepStrictEqual(pixelAt(dil, 3, 2).slice(0, 3), C, 'a fringe pixel was reconstructed')
+    })
+
+    it('maxFillRatio guard trips on a near-full mask: skipped + buffer untouched', () => {
+      const img = makeGrid([
+        [T, T, T],
+        [T, T, T],
+        [T, A, T]
+      ]) // 8/9 masked > 0.8
+      const before = new Uint8ClampedArray(img.data)
+      const r = engine.fillMaskRegion(img, colourMask(img, T), { maxFillRatio: 0.8 })
+      assert.strictEqual(r.skipped, true)
+      assert.strictEqual(r.filled, 0)
+      assert.deepStrictEqual(Array.from(img.data), Array.from(before), 'buffer left untouched on skip')
+    })
+
+    it('empty mask is a no-op (filled 0, buffer unchanged)', () => {
+      const img = makeGrid([[A, A, A], [A, A, A]])
+      const before = new Uint8ClampedArray(img.data)
+      const r = engine.fillMaskRegion(img, new Uint8Array(img.width * img.height))
+      assert.strictEqual(r.filled, 0)
+      assert.strictEqual(r.unfilled, 0)
+      assert.deepStrictEqual(Array.from(img.data), Array.from(before))
+    })
+
+    it('region confines the fill: a masked pixel outside the rect is left untouched', () => {
+      const img = makeGrid([
+        [A, A, A, A],
+        [A, T, A, T],
+        [A, A, A, A]
+      ])
+      // region covers only the left columns (x 0..2). The right T at (3,1) is outside -> untouched.
+      const r = engine.fillMaskRegion(img, colourMask(img, T), {}, { x: 0, y: 0, width: 3, height: 3 })
+      assert.deepStrictEqual(pixelAt(img, 1, 1).slice(0, 3), A, 'in-region target reconstructed')
+      assert.deepStrictEqual(pixelAt(img, 3, 1).slice(0, 3), T, 'out-of-region target left as-is')
+      assert.strictEqual(r.filled, 1, 'only the in-region pixel counted')
+    })
+
+    it('mutates in place and returns the same buffer', () => {
+      const img = makeGrid([[A, T, A]])
+      const r = engine.fillMaskRegion(img, colourMask(img, T))
+      assert.strictEqual(r.imageData, img)
+    })
+  })
 })

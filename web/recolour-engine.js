@@ -174,7 +174,6 @@
     var targetLab = rgbToLab(targetRgb)
     var b = clampRegion(region, width, height) // half-open bounds; whole image when no region
     var p, o, x, y
-    var nx, ny, nx0, nx1, ny0, ny1, found // dilation neighbour-scan locals (T30)
 
     // 1. Build the match mask — one LAB pass over the region (whole image when unbounded),
     //    same matching rule as replaceColour.
@@ -191,61 +190,89 @@
       }
     }
 
-    // 1b. Mask dilation (T30). Anti-aliased letter edges blend into the background and fall
-    //     just outside the exact-colour match, so the cardinal fill leaves them as a ghost halo.
-    //     Expanding the mask by `dilate` px (default 0 = legacy behaviour) pulls those fringe
-    //     pixels into the fill set: they become fill TARGETS and are excluded as background
-    //     SOURCES, so they get reconstructed instead of surviving as a halo. `matched` is left
-    //     reporting the ORIGINAL exact-match count — dilated pixels do not inflate it.
-    //     CRITICAL: read from `mask`, write to a separate `fillMask`, so a freshly-dilated pixel
-    //     cannot seed further growth in the same pass (that would silently bleed past `dilate` px).
+    // 1b. Mask dilation (T30) → 2. #31 guard → 3. BFS geodesic fill. All three steps are shared
+    //     with fillMaskRegion via _dilateMask + _bfsFill, so both entry points run byte-identical
+    //     reconstruction. `matched` keeps reporting the ORIGINAL exact-colour match count — the
+    //     dilated fringe does not inflate it.
     var dilate = (options && options.dilate) | 0
-    var fillMask = mask
-    if (dilate > 0) {
-      fillMask = new Uint8Array(n)
-      for (y = b.y0; y < b.y1; y++) {
-        for (x = b.x0; x < b.x1; x++) {
-          p = y * width + x
-          if (mask[p]) { fillMask[p] = 1; continue }
-          // Mark a fill target if any ORIGINAL mask pixel lies within Chebyshev radius `dilate`,
-          // clamped to the region bounds (so dilation never reaches outside the region/image).
-          ny0 = Math.max(b.y0, y - dilate); ny1 = Math.min(b.y1 - 1, y + dilate)
-          nx0 = Math.max(b.x0, x - dilate); nx1 = Math.min(b.x1 - 1, x + dilate)
-          found = false
-          for (ny = ny0; ny <= ny1 && !found; ny++) {
-            for (nx = nx0; nx <= nx1; nx++) {
-              if (mask[ny * width + nx]) { found = true; break }
-            }
+    var fillMask = _dilateMask(mask, width, b, dilate)
+    var maxFillRatio = (options && typeof options.maxFillRatio === 'number') ? options.maxFillRatio : 1
+    var fr = _bfsFill(imageData, fillMask, b, maxFillRatio)
+    if (fr.skipped) return { imageData: imageData, matched: matched, unfilled: fr.unfilled, skipped: true }
+    return { imageData: imageData, matched: matched, unfilled: fr.unfilled }
+  }
+
+  /*
+   * Expand `mask` (1 = fill target) by Chebyshev radius `dilate` within bounds `b`, returning a NEW
+   * fillMask. `dilate <= 0` → returns `mask` itself (no allocation; the legacy no-dilate path).
+   *
+   * Anti-aliased letter edges blend into the background and fall just outside an exact-colour match,
+   * surviving the fill as a ghost halo; pulling them into the fill set reconstructs them instead
+   * (T30). CRITICAL: read from `mask`, write to a separate `fillMask`, so a freshly-dilated pixel
+   * cannot seed further growth in the same pass (that would silently bleed past `dilate` px).
+   * Shared by smartFill (colour mask) and fillMaskRegion (arbitrary supplied mask).
+   */
+  function _dilateMask (mask, width, b, dilate) {
+    dilate = dilate | 0
+    if (dilate <= 0) return mask
+    var fillMask = new Uint8Array(mask.length)
+    var x, y, p, nx, ny, nx0, nx1, ny0, ny1, found
+    for (y = b.y0; y < b.y1; y++) {
+      for (x = b.x0; x < b.x1; x++) {
+        p = y * width + x
+        if (mask[p]) { fillMask[p] = 1; continue }
+        // Mark a fill target if any ORIGINAL mask pixel lies within Chebyshev radius `dilate`,
+        // clamped to the region bounds (so dilation never reaches outside the region/image).
+        ny0 = Math.max(b.y0, y - dilate); ny1 = Math.min(b.y1 - 1, y + dilate)
+        nx0 = Math.max(b.x0, x - dilate); nx1 = Math.min(b.x1 - 1, x + dilate)
+        found = false
+        for (ny = ny0; ny <= ny1 && !found; ny++) {
+          for (nx = nx0; nx <= nx1; nx++) {
+            if (mask[ny * width + nx]) { found = true; break }
           }
-          if (found) fillMask[p] = 1
         }
+        if (found) fillMask[p] = 1
       }
     }
+    return fillMask
+  }
+
+  /*
+   * BFS / Fast-Marching geodesic fill core (T42) — the colour-agnostic reconstruction shared by
+   * smartFill and fillMaskRegion. Reconstruct every pixel set in `fillMask` from the surrounding
+   * background, processing in non-decreasing geodesic (8-connected) distance from the mask boundary,
+   * estimating each pixel as the inverse-distance-weighted mean of its already-KNOWN neighbours.
+   * Geodesic distance follows connected paths, so it never crosses a background gap (concave masks)
+   * and always reaches corner/edge pixels (#32). A pixel is a colour SOURCE (known=1) if it is
+   * in-region and NOT in fillMask (the dilated fringe is in fillMask, so excluded — CORE-8).
+   * Mutates imageData.data IN PLACE.
+   *
+   * @returns {{skipped: boolean, unfilled: number, fillCount: number}} skipped:true when the #31
+   *        maxFillRatio guard tripped (buffer left untouched, unfilled = fillCount). fillCount =
+   *        total fill-set size; filled = fillCount - unfilled.
+   */
+  function _bfsFill (imageData, fillMask, b, maxFillRatio) {
+    var data = imageData.data
+    var width = imageData.width
+    var n = width * imageData.height
+    var x, y, p, o
 
     // 2. #31 guard. Count the fill set and bail if it covers almost the whole region: with that
     //    little background left there is nothing meaningful to sample, the result is garbage, and
     //    the O(area) work can stall the main thread long enough to corrupt a GPU frame (the stripe /
-    //    glitch artifacts in #31). Engine default maxFillRatio = 1 (effectively off) keeps the unit
-    //    tests deterministic; the GUI opts in with 0.8. `skipped` lets the caller warn + not paint.
+    //    glitch artifacts in #31). Default maxFillRatio = 1 (effectively off) keeps the unit tests
+    //    deterministic; the GUI opts in with 0.8. `skipped` lets the caller warn + not paint.
     var regionArea = (b.x1 - b.x0) * (b.y1 - b.y0)
     var fillCount = 0
     for (y = b.y0; y < b.y1; y++) {
       for (x = b.x0; x < b.x1; x++) { if (fillMask[y * width + x]) fillCount++ }
     }
-    var maxFillRatio = (options && typeof options.maxFillRatio === 'number') ? options.maxFillRatio : 1
-    if (regionArea > 0 && fillCount / regionArea > maxFillRatio) {
-      return { imageData: imageData, matched: matched, unfilled: fillCount, skipped: true }
+    var mfr = (typeof maxFillRatio === 'number') ? maxFillRatio : 1
+    if (regionArea > 0 && fillCount / regionArea > mfr) {
+      return { skipped: true, unfilled: fillCount, fillCount: fillCount }
     }
 
-    // 3. BFS / Fast-Marching geodesic fill. Process masked pixels in non-decreasing geodesic
-    //    (8-connected) distance from the mask boundary, estimating each pixel's colour as the
-    //    inverse-distance-weighted mean of its already-KNOWN neighbours. Geodesic distance follows
-    //    connected paths, so — unlike the old cardinal straight-line scan — it never crosses a
-    //    background gap (concave masks) and always reaches corner/edge pixels (#32).
-    //
-    //    A pixel is a colour SOURCE (known=1) if it is original background: in-region and NOT in
-    //    fillMask. The dilated fringe is in fillMask, so it is excluded as a source (CORE-8: never
-    //    sample target-contaminated pixels).
+    // 3. BFS geodesic fill.
     var known = new Uint8Array(n)   // 1 = valid colour source (original bg OR an already-filled px)
     var queued = new Uint8Array(n)  // 1 = already placed in the queue (never enqueue twice)
     for (y = b.y0; y < b.y1; y++) {
@@ -337,7 +364,37 @@
       }
     }
 
-    return { imageData: imageData, matched: matched, unfilled: unfilled }
+    return { skipped: false, unfilled: unfilled, fillCount: fillCount }
+  }
+
+  /*
+   * Inpaint an arbitrary supplied mask (T29 Phase 3 — tiled-watermark propagation fill).
+   *
+   * Unlike smartFill, the fill set is given DIRECTLY (e.g. propagateMask()'s union mask) rather than
+   * derived from a target colour — so this path is colour-agnostic. Reuses the exact dilation (T30)
+   * + #31 guard + BFS geodesic core (T42) as smartFill, via the shared _dilateMask / _bfsFill
+   * internals, so a mask equal to smartFill's colour mask yields byte-identical pixels.
+   *
+   * @param {ImageData|{data,width,height}} imageData  RGBA buffer. Mutated IN PLACE.
+   * @param {Uint8Array} mask  width*height; non-zero marks a pixel to reconstruct from background.
+   * @param {object} [options]  `dilate` (default 0) — expand the mask before filling (anti-alias
+   *        fringe); `maxFillRatio` (default 1 = off; the GUI passes 0.8) — skip + return skipped:true
+   *        when the fill set exceeds this fraction of the region.
+   * @param {object} [region]  optional {x,y,width,height}; omitted → whole image. The GUI passes null
+   *        so the #31 guard denominator is the full image — correct for thin, sparse tiled strokes.
+   * @returns {{imageData: ImageData, filled: number, unfilled: number, skipped?: boolean}}
+   *        filled = pixels reconstructed (fill set minus unfilled). skipped:true → buffer untouched.
+   */
+  function fillMaskRegion (imageData, mask, options, region) {
+    var width = imageData.width
+    var height = imageData.height
+    var b = clampRegion(region, width, height)
+    var dilate = (options && options.dilate) | 0
+    var maxFillRatio = (options && typeof options.maxFillRatio === 'number') ? options.maxFillRatio : 1
+    var fillMask = _dilateMask(mask, width, b, dilate)
+    var fr = _bfsFill(imageData, fillMask, b, maxFillRatio)
+    if (fr.skipped) return { imageData: imageData, filled: 0, unfilled: fr.unfilled, skipped: true }
+    return { imageData: imageData, filled: fr.fillCount - fr.unfilled, unfilled: fr.unfilled }
   }
 
   /*
@@ -1141,6 +1198,7 @@
     deltaE76: deltaE76,
     replaceColour: replaceColour,
     smartFill: smartFill,
+    fillMaskRegion: fillMaskRegion,
     detectWatermark: detectWatermark,
     detectTiling: detectTiling,
     propagateMask: propagateMask

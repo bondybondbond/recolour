@@ -50,6 +50,16 @@
   var detectBtn = document.getElementById('detectBtn')
   var detectOverlay = document.getElementById('detectOverlay')
 
+  // Tile-fill propagation (T29 Phase 3, #52)
+  var tileBtn = document.getElementById('tileBtn')
+  var tileOverlay = document.getElementById('tileOverlay')
+  var tileConfirm = document.getElementById('tileConfirm')
+  var tileCount = document.getElementById('tileCount')
+  var tileBand = document.getElementById('tileBand')
+  var tileSubchip = document.getElementById('tileSubchip')
+  var tileAccept = document.getElementById('tileAccept')
+  var tileCancel = document.getElementById('tileCancel')
+
   // Region selection (T17)
   var regionBtn = document.getElementById('regionBtn')
   var regionRect = document.getElementById('regionRect')
@@ -114,6 +124,15 @@
   // eyedropper. The overlay is a one-shot snapshot: it clears on new image / Reset / Undo / commit.
   var detectOn = false
   var DETECT_MAX_PIXELS = 4000000 // above this, detection can jank the main thread — warn first (#43)
+
+  // Tile-fill propagation (T29 Phase 3, #52). `tileOn` arms the confirm overlay; `tileResult` caches
+  // the last propagation { seed, propMask, instances, sub, combCount, basis, tileDoubled } so the
+  // subharmonic "double the spacing" button can re-propagate without re-detecting. Like auto-detect
+  // the overlay is display-only until the user Accepts; it clears on new image / Reset / Undo /
+  // commit / clear-region. Requires a committed region (the seed box around one instance) to run.
+  var tileOn = false
+  var tileResult = null
+  var TILE_MAX_PIXELS = DETECT_MAX_PIXELS // detectTiling's multi-radius FFT is heavy — warn + defer (#43)
 
   // Region selection (T17). `region` is the active bounding box in IMAGE pixel coords
   // ({x,y,width,height}) or null for whole-image. `selecting` arms drag-to-draw mode (mutually
@@ -240,6 +259,7 @@
     exitSelecting()
     setXray(false) // a fresh image starts with the normal (un-enhanced) view (T29)
     setDetect(false) // drop any auto-detect overlay from a previous image (T29 Phase 2)
+    setTile(false) // drop any tile-fill propagation overlay from a previous image (T29 Phase 3, #52)
     resetPickerWell()
     updateControls() // no recolour yet on the new image -> undo + before/after disabled
   }
@@ -435,6 +455,7 @@
     if (e.key === 'Escape') {
       if (pickerOpen) cancelPicker() // colour popover takes priority (T28)
       else if (modal.classList.contains('open')) closeModal()
+      else if (tileOn) cancelTile() // dismiss the tile-fill confirm overlay (T29 Phase 3, #52)
       else if (resizing) cancelResize() // restore pre-drag bounds (T33) — before draw/pick
       else if (selecting) exitSelecting() // cancel an armed region-draw (T17)
       else if (picking) disarmPicker()
@@ -962,6 +983,7 @@
       return
     }
     if (!baseImageData) { setDetect(false); return }
+    if (tileOn) setTile(false) // only one canvas overlay at a time (T29 Phase 3, #52)
     // Large-image guard (#43): detection is synchronous and ~O(W·H). Warn FIRST, then defer one
     // tick so the notice actually paints before the main thread freezes on the scan.
     if (canvas.width * canvas.height > DETECT_MAX_PIXELS) {
@@ -1047,6 +1069,195 @@
   sidebar.addEventListener('scroll', function () { if (detectOn) positionDetectOverlay() })
 
   // ---------------------------------------------------------------------------
+  // Tile-fill propagation (T29 Phase 3, #52)
+  // ---------------------------------------------------------------------------
+  // The user boxes ONE watermark instance with Select area (T17), then Tile-fill detects the tiling
+  // lattice (Engine.detectTiling → tileBasis) and stamps the detected seed shape (detectWatermark
+  // within the box) across every lattice node (Engine.propagateMask). A confirm overlay previews the
+  // propagated union mask (display-only); on Accept the mask is inpainted in one undoable op
+  // (Engine.fillMaskRegion). Lifecycle mirrors auto-detect: clears on new image / Reset / Undo /
+  // commit / clear-region.
+  function setTile (on) {
+    tileOn = on
+    tileBtn.classList.toggle('active', on)
+    tileBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    if (!on) {
+      tileOverlay.style.display = 'none'
+      tileConfirm.style.display = 'none'
+      tileResult = null
+      restoreDetectHint()
+      return
+    }
+    if (!baseImageData) { setTile(false); return }
+    // Tile-fill needs a seed: the committed region box around one watermark instance. Turn the
+    // button back off, THEN set the hint (setTile(false) calls restoreDetectHint, which would wipe a
+    // hint set before it).
+    if (!region) {
+      setTile(false)
+      setDetectHint('▢ Box one watermark instance first (Select area), then Tile-fill', true)
+      return
+    }
+    if (detectOn) setDetect(false) // only one canvas overlay at a time
+    // Large-image guard (#43): detectTiling's multi-radius FFT is heavy. Warn FIRST, then defer one
+    // tick so the notice paints before the main thread freezes.
+    if (canvas.width * canvas.height > TILE_MAX_PIXELS) {
+      setDetectHint('⏳ Large image — detecting tiling, this may pause briefly…', true)
+      setTimeout(runTile, 20)
+    } else {
+      runTile()
+    }
+  }
+
+  function runTile () {
+    if (!tileOn || !baseImageData || !region) return
+    // Seed shape = the detected watermark glyph(s) inside the user's box (edge-based, colour-agnostic).
+    var seed = Engine.detectWatermark(baseImageData, DETECT_PROFILE, region).mask
+    var t = Engine.detectTiling(baseImageData, { region: region })
+    var prop = Engine.propagateMask(seed, canvas.width, canvas.height, t.tileBasis)
+    tileResult = {
+      seed: seed,
+      propMask: prop.mask,
+      instances: prop.instances,
+      sub: prop.subharmonicWarning,
+      combCount: t.combCount,
+      basis: t.tileBasis,
+      tileDoubled: false
+    }
+    paintTileOverlay(prop.mask)
+    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning)
+    restoreDetectHint() // clear the "detecting…" notice — the card now carries the status
+  }
+
+  // Paint the propagated union mask as a translucent CYAN tint (distinct from auto-detect's magenta)
+  // onto the overlay canvas at IMAGE resolution, then size/position it over #canvas in CSS px.
+  function paintTileOverlay (mask) {
+    tileOverlay.width = canvas.width
+    tileOverlay.height = canvas.height
+    var octx = tileOverlay.getContext('2d')
+    octx.clearRect(0, 0, canvas.width, canvas.height)
+    var tint = octx.createImageData(canvas.width, canvas.height)
+    var td = tint.data
+    for (var i = 0; i < mask.length; i++) {
+      if (mask[i]) { var o = i * 4; td[o] = 0; td[o + 1] = 200; td[o + 2] = 255; td[o + 3] = 120 }
+    }
+    octx.putImageData(tint, 0, 0)
+    positionTileOverlay()
+    tileOverlay.style.display = 'block'
+  }
+
+  // Cover #canvas exactly — same rect maths as positionDetectOverlay, so the overlay tracks
+  // letterboxing / portrait images (sx===sy, CORE-10), window resize and sidebar scroll.
+  function positionTileOverlay () {
+    if (!tileOn) return
+    var cRect = canvas.getBoundingClientRect()
+    var aRect = canvasArea.getBoundingClientRect()
+    tileOverlay.style.left = (cRect.left - aRect.left) + 'px'
+    tileOverlay.style.top = (cRect.top - aRect.top) + 'px'
+    tileOverlay.style.width = cRect.width + 'px'
+    tileOverlay.style.height = cRect.height + 'px'
+  }
+
+  // Confirm card: instance-count pill + confidence band (HARD requirement, #52). The band is driven
+  // by combCount, NOT a binary tiling flag — WhatsApp .19 (a real target) sits at combCount=5, exactly
+  // at the detection gate, so a true/false pill would hide false negatives (LEARNINGS #50/#51).
+  function showTileConfirm (combCount, instances, sub) {
+    tileCount.textContent = 'Found ' + instances + ' instance' + (instances === 1 ? '' : 's')
+    if (combCount >= 6) {
+      tileBand.textContent = 'Strong tiling signal'
+      tileBand.classList.remove('warn')
+    } else if (combCount === 5) {
+      tileBand.textContent = 'Weak tiling signal — some instances may be missed'
+      tileBand.classList.add('warn')
+    } else {
+      tileBand.textContent = 'Not detected by current threshold'
+      tileBand.classList.add('warn')
+    }
+    // Subharmonic recovery chip (HARD requirement, #52). propagateMask flags a half-period lock when
+    // the basis is shorter than the seed footprint — stamps overlap impossibly. The chip lets the user
+    // double the spacing in one click (onSubchip). Hidden when there is no lock.
+    if (sub) {
+      tileSubchip.textContent = '⤢ Tile spacing looks halved — double it?'
+      tileSubchip.disabled = false
+      tileSubchip.style.display = 'block'
+    } else {
+      tileSubchip.style.display = 'none'
+    }
+    tileConfirm.style.display = 'flex'
+  }
+
+  // Subharmonic "double the spacing" action (#52). Re-propagate with a 2×-scaled basis: longer
+  // vectors → a coarser lattice with FEWER (≈half in 1-D) nodes, removing the overlapping half-period
+  // stamps — so the instance count DROPS (that is the success signal). Upper-bounded: we never offer a
+  // SECOND doubling — if the lock persists the chip becomes a non-actionable note so the user can't
+  // loop into repeated overshoots.
+  function onSubchip () {
+    if (!tileResult || tileSubchip.disabled) return
+    var basis2x = tileResult.basis.map(function (v) { return { x: v.x * 2, y: v.y * 2 } })
+    var prop2 = Engine.propagateMask(tileResult.seed, canvas.width, canvas.height, basis2x)
+    tileResult.propMask = prop2.mask
+    tileResult.instances = prop2.instances
+    tileResult.sub = prop2.subharmonicWarning
+    tileResult.basis = basis2x
+    tileResult.tileDoubled = true // basis no longer matches raw detectTiling — block stale reuse
+    paintTileOverlay(prop2.mask)
+    tileCount.textContent = 'Found ' + prop2.instances + ' instance' + (prop2.instances === 1 ? '' : 's')
+    if (prop2.subharmonicWarning) {
+      // Still locked after one doubling — stop here (no infinite 2× loop).
+      tileSubchip.textContent = '⤢ Spacing still looks off — accept or re-box'
+      tileSubchip.disabled = true
+    } else {
+      tileSubchip.style.display = 'none'
+    }
+  }
+
+  // Accept: inpaint the propagated mask and commit as a single undoable op. NOTE: we deliberately do
+  // NOT call commitOperation() here — it early-returns when targetRgb is null (tile-fill has no picked
+  // colour), which would silently drop the undo snapshot. So we snapshot the undo entry directly,
+  // exactly as commitOperation does. Do NOT "simplify" this back to commitOperation().
+  function acceptTile () {
+    if (!tileResult || !baseImageData) return
+    var work = new ImageData(
+      new Uint8ClampedArray(baseImageData.data),
+      canvas.width,
+      canvas.height
+    )
+    // region:null → the #31 guard denominator is the whole image (thin tiled strokes stay well under
+    // the ratio). dilate:1 reconstructs anti-aliased edges (T30) — bump to 2 if QA shows a 1px halo.
+    var r = Engine.fillMaskRegion(work, tileResult.propMask, { dilate: 1, maxFillRatio: 0.8 }, null)
+    if (r && r.skipped) {
+      showHintWarning('⚠ Tile-fill skipped — too much of the image matches. Re-box a tighter instance.')
+      return // leave the canvas + base untouched; nothing committed
+    }
+    if (!r || r.filled === 0) {
+      showHintWarning('⚠ Nothing to fill — no watermark shape detected in the box.')
+      return
+    }
+    ctx.putImageData(work, 0, 0)
+    // Commit directly (see note above): push the pre-fill base, cap history, snapshot the new base.
+    undoStack.push(baseImageData)
+    if (undoStack.length > MAX_UNDO) undoStack.shift()
+    baseImageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    livePreviewImageData = null
+    if (detectOn) setDetect(false) // a fill invalidates any auto-detect snapshot
+    setTile(false) // hide overlay + card; clears tileResult
+    updateControls() // a recolour now exists -> undo + before/after enabled
+  }
+
+  function cancelTile () {
+    setTile(false) // hide overlay + card, clear tileResult; the seed region box stays
+  }
+
+  tileBtn.addEventListener('click', function () { setTile(!tileOn) })
+  tileBtn.addEventListener('keydown', function (e) {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setTile(!tileOn) }
+  })
+  tileAccept.addEventListener('click', acceptTile)
+  tileCancel.addEventListener('click', cancelTile)
+  tileSubchip.addEventListener('click', onSubchip)
+  window.addEventListener('resize', function () { if (tileOn) positionTileOverlay() })
+  sidebar.addEventListener('scroll', function () { if (tileOn) positionTileOverlay() })
+
+  // ---------------------------------------------------------------------------
   // Preview (one-shot, on pick) + reset
   // ---------------------------------------------------------------------------
   function selectedReplaceRgb () {
@@ -1109,6 +1320,7 @@
   // the undo stack. No-op when no colour is picked (nothing live to commit).
   function commitOperation () {
     if (detectOn) setDetect(false) // an edit invalidates the auto-detect snapshot (T29 Phase 2)
+    if (tileOn) setTile(false) // …and the tile-fill propagation preview (T29 Phase 3, #52)
     if (!targetRgb) return
     undoStack.push(baseImageData)
     if (undoStack.length > MAX_UNDO) undoStack.shift() // push first, then drop oldest
@@ -1123,6 +1335,7 @@
     if (!originalImageData) return
     cancelScheduledPreview() // drop any frame queued from a mid-drag slider move
     if (detectOn) setDetect(false) // the overlay is stale once the canvas content changes (T29 Phase 2)
+    if (tileOn) setTile(false) // tile-fill preview is stale once the canvas content changes (#52)
     if (targetRgb) {
       // Discard the live, uncommitted op -> repaint the committed base.
       targetRgb = null
@@ -1188,6 +1401,7 @@
     exitSelecting()
     setXray(false) // Reset returns to the normal (un-enhanced) view (T29)
     setDetect(false) // clear any auto-detect overlay (T29 Phase 2)
+    setTile(false) // clear any tile-fill propagation overlay (T29 Phase 3, #52)
     resetPickerWell()
     updateControls() // back to the original -> undo + before/after disabled
   })

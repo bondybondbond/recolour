@@ -705,6 +705,11 @@
     JPEG_LAG: 8,        // JPEG 8x8 DCT block period -> AC peak at lag 8 (a fundamental at/below
                         // JPEG_LAG+2 is the compression grid, not a watermark)
     TOP_N: 12,          // peaks to keep
+    MIN_BASIS_ANGLE_COS: 0.5, // #46: a second lattice basis vector must be >= 60deg off the
+                        // fundamental (|cos| < this) to count as a genuinely different direction
+                        // rather than a higher harmonic of the same axis. TUNABLE — a shallow-angle
+                        // diagonal tiling could have two real basis vectors that are near-collinear;
+                        // raise toward 1 (allow smaller separations) only with diagonal-fixture evidence.
     RMED: 16,           // LCN local-magnitude blur radius (fixed structural choice)
     BLUR_PASSES: 3,     // box-blur passes -> Gaussian approximation
     RBIG_SWEEP: [32, 64, 128], // high-pass radii to try (filtered to <= N/2 at call time)
@@ -904,22 +909,31 @@
   // HARMONIC-COMB SCORE — the key signal. Take the smallest-lag strong peak as the fundamental, then
   // count strong peaks whose lag is (a) a near-integer multiple of the fundamental AND (b) roughly
   // collinear with it. >= COMB_MIN such peaks == real tiling.
+  //
+  // #46 also extracts the lattice basis for mask propagation: `fund` is the primary tile vector, and
+  // `basis2` is the STRONGEST strong peak that is NOT collinear with `fund` (>= MIN_BASIS_ANGLE_COS off
+  // axis) — the second grid direction, or null for a 1-D tiling. `strong` is in descending-AC order
+  // (acPeaks sorts by value), so the first non-collinear hit is the strongest second-direction peak.
+  // Note: basis2 is for EXTRACTION only and does not affect `count`/the comb gate — the gate stays a
+  // single-direction collinear comb, so this change cannot move existing tiling verdicts.
   function combScore (peaks, floor, ratio) {
     var strong = peaks.filter(function (p) { return p.v / floor >= ratio })
-    if (!strong.length) return { count: 0, fund: null, fr: 0 }
+    if (!strong.length) return { count: 0, fund: null, fr: 0, basis2: null }
     var fund = strong[0]
     for (var i = 1; i < strong.length; i++) {
       if (Math.hypot(strong[i].lx, strong[i].ly) < Math.hypot(fund.lx, fund.ly)) fund = strong[i]
     }
     var fr = Math.hypot(fund.lx, fund.ly) || 1
     var dirx = fund.lx / fr, diry = fund.ly / fr, count = 0
+    var basis2 = null
     for (var p = 0; p < strong.length; p++) {
       var r = Math.hypot(strong[p].lx, strong[p].ly)
       var k = r / fr
       var collinear = Math.abs((strong[p].lx * dirx + strong[p].ly * diry) / r)
       if (Math.abs(k - Math.round(k)) <= 0.2 && collinear > 0.85) count++
+      if (basis2 === null && r > 0 && collinear < TILING.MIN_BASIS_ANGLE_COS) basis2 = strong[p]
     }
-    return { count: count, fund: fund, fr: fr }
+    return { count: count, fund: fund, fr: fr, basis2: basis2 }
   }
 
   /**
@@ -934,17 +948,22 @@
    * @param {ImageData|{data,width,height}} imageData  RGBA buffer. NOT mutated (read-only).
    * @param {object} [options]  region: optional {x,y,width,height} to recentre the analysis window.
    * @returns {{tiling:boolean, period:number, combCount:number, topRatio:number,
-   *            confidence:number, rbig:number}}
+   *            confidence:number, rbig:number, tileBasis:Array<{x:number,y:number}>}}
    *        tiling is the contract. period = fundamental lag (px). combCount = collinear harmonics at
    *        the winning radius. topRatio = strongest AC peak/floor (DIAGNOSTIC ONLY — not the gate).
    *        confidence in [0,1]. rbig = winning high-pass radius (NOT a spatial scale).
+   *        tileBasis (#46) = lattice basis vectors in IMAGE-PIXEL offsets, ready as propagateMask
+   *        translation vectors: [primary] for a 1-D tiling, [primary, secondary] for a 2-D grid, or []
+   *        when no periodic peak was found. Each vector is sign-normalised into a canonical half-plane
+   *        so stamping is deterministic. Surfaced regardless of the `tiling` gate (a caller propagates
+   *        only when it trusts `tiling`); |tileBasis[0]| ~= period.
    */
   function detectTiling (imageData, options) {
     var opt = options || {}
     var region = opt.region ? clampRegion(opt.region, imageData.width, imageData.height) : null
     var avail = region ? Math.min(region.width, region.height) : Math.min(imageData.width, imageData.height)
     var N = po2Floor(Math.min(avail, TILING.N_CAP))
-    var empty = { tiling: false, period: 0, combCount: 0, topRatio: 0, confidence: 0, rbig: 0 }
+    var empty = { tiling: false, period: 0, combCount: 0, topRatio: 0, confidence: 0, rbig: 0, tileBasis: [] }
     if (N < TILING.N_FLOOR) return empty // too small to host a >=4-harmonic comb
 
     var lagMax = Math.min(TILING.LAG_MAX_CAP, N / 2 - 2)
@@ -974,7 +993,8 @@
       var topRatio = pk.peaks.length ? pk.peaks[0].v / pk.floor : 0
       var m = {
         tiling: comb.count >= TILING.COMB_MIN && cleanScale,
-        period: fundLag, combCount: comb.count, topRatio: topRatio, rbig: radii[ri]
+        period: fundLag, combCount: comb.count, topRatio: topRatio, rbig: radii[ri],
+        fund: comb.fund, basis2: comb.basis2 // #46: carried for tileBasis; stripped before return
       }
       if (best === null ||
           (m.tiling && !best.tiling) ||
@@ -989,7 +1009,131 @@
     // Zeroed when not tiling (mirrors detectWatermark's [0,1] convention).
     best.confidence = best.tiling
       ? Math.max(0, Math.min((best.combCount - TILING.COMB_MIN + 1) / (10 - TILING.COMB_MIN + 1), 1)) : 0
+
+    // #46: build the image-pixel lattice basis from the winning radius's fundamental + 2nd vector, sign-
+    // normalised into a canonical half-plane (x > 0, or x == 0 && y > 0) so a symmetric lattice always
+    // yields the same stamping direction. Strip the raw peak refs so the return shape stays clean.
+    best.tileBasis = []
+    if (best.fund) best.tileBasis.push(canonicalBasis(best.fund.lx, best.fund.ly))
+    if (best.basis2) best.tileBasis.push(canonicalBasis(best.basis2.lx, best.basis2.ly))
+    delete best.fund
+    delete best.basis2
     return best
+  }
+
+  // Sign-normalise a lag vector into the canonical half-plane (x > 0, or x == 0 && y > 0). The AC
+  // lattice is symmetric (a peak at (lx,ly) implies one at (-lx,-ly)), so without a fixed sign the
+  // stamping direction would be ambiguous. #46.
+  function canonicalBasis (lx, ly) {
+    if (lx > 0 || (lx === 0 && ly > 0)) return { x: lx, y: ly }
+    return { x: -lx, y: -ly }
+  }
+
+  // =============================================================================================
+  // propagateMask (#46, T29 Phase 3) — stamp one confirmed watermark instance across the lattice.
+  //
+  // DESIGN PRINCIPLE (preserve): recolour's differentiator is FIND-AND-MASK EVERY INSTANCE *before*
+  // fill — the opposite of AI semantic-inpainting tools (e.g. DrWatermark) that reconstruct behind a
+  // single mask and hope the guess is right. Masking all instances first (including ones invisible
+  // against a matching background — white text over white sky) is deterministic and honest. Keep this
+  // intent visible: the machine does not need to SEE the hidden instances, only to know where the
+  // tiling says they must be.
+  // =============================================================================================
+  var PROPAGATE = {
+    MAX_INSTANCES: 4096, // hard cap — a near-zero basis must not spin millions of stamps (DoS-shaped)
+    MIN_BASIS_MAG: 2     // basis vectors shorter than this are degenerate (treated as "no tiling")
+  }
+
+  /**
+   * Stamp `seedMask` at every lattice node spanned by `basis`, OR-ing into a fresh mask.
+   *
+   * Pure: reads `seedMask`, allocates its own output, mutates nothing — Node-testable (TEST-2).
+   *
+   * @param {Uint8Array} seedMask  width*height; non-zero marks the ONE confirmed instance. (The GUI
+   *        slice will derive this from a manual region via detectWatermark(base, profile, region).mask.)
+   * @param {number} width
+   * @param {number} height
+   * @param {Array<{x:number,y:number}>} basis  1 or 2 image-pixel lattice vectors, e.g.
+   *        detectTiling().tileBasis. 1 vector -> stamp along a line; 2 -> stamp across the 2-D grid.
+   * @param {object} [opts]  maxInstances: override the PROPAGATE.MAX_INSTANCES cap.
+   * @returns {{mask:Uint8Array, instances:number, subharmonicWarning:boolean}}
+   *   mask: the seed OR-stamped at every lattice node whose translated bbox overlaps the image,
+   *         clamped to bounds.
+   *   instances: TOTAL stamped copies INCLUDING the seed (node (0,0)). A seed with pixels but no valid
+   *         basis returns 1, never 0 — the GUI "Found N regions" pill reads this directly, so a 1 means
+   *         "just the seed". An EMPTY seed (no set pixels) returns 0.
+   *   subharmonicWarning: true when a basis vector is shorter than the seed's bbox footprint projected
+   *         onto that vector's direction. That is the FFT half-period lock (detectTiling can lock onto
+   *         half the true period when the watermark has internal symmetry) — stamps would overlap
+   *         heavily, which is physically impossible for a non-overlapping tiling. Non-blocking: the mask
+   *         is still returned; the GUI slice surfaces it (e.g. "spacing looks halved — double it?").
+   *         A richer per-instance content match-score is a Phase 4 follow-up.
+   */
+  function propagateMask (seedMask, width, height, basis, opts) {
+    opts = opts || {}
+    var maxInstances = opts.maxInstances != null ? opts.maxInstances : PROPAGATE.MAX_INSTANCES
+    var out = new Uint8Array(seedMask.length)
+
+    // Collect the seed's set-pixel coords + bbox once.
+    var cx = [], cy = [], minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity
+    for (var p = 0; p < seedMask.length; p++) {
+      if (!seedMask[p]) continue
+      var x = p % width, y = (p / width) | 0
+      cx.push(x); cy.push(y)
+      if (x < minx) minx = x
+      if (x > maxx) maxx = x
+      if (y < miny) miny = y
+      if (y > maxy) maxy = y
+    }
+    if (!cx.length) return { mask: out, instances: 0, subharmonicWarning: false } // empty seed
+
+    // Keep only non-degenerate basis vectors.
+    var vecs = []
+    if (basis) {
+      for (var bi = 0; bi < basis.length; bi++) {
+        var mag = Math.hypot(basis[bi].x, basis[bi].y)
+        if (mag >= PROPAGATE.MIN_BASIS_MAG) vecs.push({ x: basis[bi].x, y: basis[bi].y, mag: mag })
+      }
+    }
+    // No usable basis -> nothing to propagate; return just the seed (instances:1).
+    if (!vecs.length) {
+      for (var s0 = 0; s0 < cx.length; s0++) out[cy[s0] * width + cx[s0]] = 1
+      return { mask: out, instances: 1, subharmonicWarning: false }
+    }
+
+    // Sub-harmonic guard: project the seed bbox onto each basis direction; if the vector is shorter
+    // than that footprint, adjacent stamps overlap heavily — the half-period lock signature.
+    var bw = maxx - minx + 1, bh = maxy - miny + 1
+    var subharmonicWarning = false
+    for (var vi = 0; vi < vecs.length; vi++) {
+      var ux = vecs[vi].x / vecs[vi].mag, uy = vecs[vi].y / vecs[vi].mag
+      var extent = Math.abs(ux) * bw + Math.abs(uy) * bh
+      if (vecs[vi].mag < extent) subharmonicWarning = true
+    }
+
+    // Sweep the lattice. (0,0) is the seed itself and is always stamped (its bbox is in-image). Node
+    // ranges are bounded by image diagonal / basis magnitude; the MAX_INSTANCES cap is the hard stop.
+    var v0 = vecs[0], v1 = vecs[1] || null
+    var diag = width + height
+    var iMax = Math.ceil(diag / v0.mag) + 1
+    var jMax = v1 ? Math.ceil(diag / v1.mag) + 1 : 0
+    var instances = 0
+    for (var i = -iMax; i <= iMax; i++) {
+      for (var j = -jMax; j <= jMax; j++) {
+        var ox = Math.round(i * v0.x + (v1 ? j * v1.x : 0))
+        var oy = Math.round(i * v0.y + (v1 ? j * v1.y : 0))
+        // Only stamp nodes whose translated bbox actually overlaps the image.
+        if (maxx + ox < 0 || minx + ox >= width || maxy + oy < 0 || miny + oy >= height) continue
+        instances++
+        for (var s = 0; s < cx.length; s++) {
+          var nx = cx[s] + ox, ny = cy[s] + oy
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+          out[ny * width + nx] = 1
+        }
+        if (instances >= maxInstances) { i = iMax + 1; break } // hard cap — abandon the rest of the sweep
+      }
+    }
+    return { mask: out, instances: instances, subharmonicWarning: subharmonicWarning }
   }
 
   return {
@@ -998,6 +1142,7 @@
     replaceColour: replaceColour,
     smartFill: smartFill,
     detectWatermark: detectWatermark,
-    detectTiling: detectTiling
+    detectTiling: detectTiling,
+    propagateMask: propagateMask
   }
 })

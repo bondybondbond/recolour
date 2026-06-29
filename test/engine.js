@@ -743,4 +743,126 @@ describe('recolour engine', function () {
       }
     })
   })
+
+  describe('propagateMask / tileBasis (#46)', function () {
+    this.timeout(15000) // round-trip runs the 3-radius N=512 FFT sweep (~500ms)
+
+    // A filled WxH rectangle seed at (x0,y0), as a flat Uint8Array mask.
+    function seedBlock (W, H, x0, y0, w, h) {
+      const m = new Uint8Array(W * H)
+      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) m[y * W + x] = 1
+      return m
+    }
+    function countSet (mask) { let n = 0; for (let i = 0; i < mask.length; i++) if (mask[i]) n++; return n }
+
+    // Horizontal stripe field (periodic in Y) — the same clean-comb synthetic the detectTiling block
+    // uses, so the AC fundamental is ~ (0, pitch). Used for the basis + round-trip tests.
+    function stripeField (N, pitch) {
+      const data = new Uint8ClampedArray(N * N * 4)
+      for (let i = 0; i < N * N; i++) { data[i * 4] = 200; data[i * 4 + 1] = 200; data[i * 4 + 2] = 200; data[i * 4 + 3] = 255 }
+      const W0 = 64, x0 = Math.floor(N / 2 - W0 / 2)
+      for (let cy = Math.floor(pitch / 2); cy < N; cy += pitch) {
+        for (let yy = cy - 1; yy <= cy + 1; yy++) {
+          if (yy < 0 || yy >= N) continue
+          for (let x = x0; x < x0 + W0; x++) { const o = (yy * N + x) * 4; data[o] = 80; data[o + 1] = 80; data[o + 2] = 80 }
+        }
+      }
+      return { data, width: N, height: N }
+    }
+
+    it('detectTiling surfaces a tileBasis whose primary magnitude ~= period when tiling', function () {
+      const r = engine.detectTiling(stripeField(512, 40))
+      assert.strictEqual(r.tiling, true, `expected tiling:true (combCount=${r.combCount})`)
+      assert.ok(Array.isArray(r.tileBasis) && r.tileBasis.length >= 1, 'tileBasis must be non-empty when tiling')
+      const mag = Math.hypot(r.tileBasis[0].x, r.tileBasis[0].y)
+      assert.ok(Math.abs(mag - r.period) < 2, `|tileBasis[0]| ${mag.toFixed(1)} should ~= period ${r.period}`)
+    })
+
+    it('tileBasis vectors are sign-normalised into the canonical half-plane', function () {
+      const r = engine.detectTiling(stripeField(512, 40))
+      r.tileBasis.forEach(v => {
+        assert.ok(v.x > 0 || (v.x === 0 && v.y > 0), `basis ${JSON.stringify(v)} not in canonical half-plane`)
+      })
+    })
+
+    it('a too-small (non-analysable) image yields an empty tileBasis array', function () {
+      const small = { data: new Uint8ClampedArray(32 * 32 * 4).fill(255), width: 32, height: 32 }
+      assert.deepStrictEqual(engine.detectTiling(small).tileBasis, [])
+    })
+
+    it('stamps a seed across a 2-vector lattice at exactly the expected nodes', function () {
+      const W = 100, H = 100
+      const seed = seedBlock(W, H, 10, 10, 5, 5)
+      const r = engine.propagateMask(seed, W, H, [{ x: 20, y: 0 }, { x: 0, y: 30 }])
+      assert.strictEqual(r.mask[10 * W + 10], 1, 'seed node present')
+      assert.strictEqual(r.mask[40 * W + 30], 1, 'node (+20,+30) present') // 10+20, 10+30
+      assert.strictEqual(r.mask[10 * W + 25], 0, 'mid-gap between stamps stays 0')
+      assert.ok(r.instances > 1, 'multiple instances stamped')
+      assert.strictEqual(r.subharmonicWarning, false, 'well-separated lattice -> no warning')
+    })
+
+    it('clamps stamps to image bounds (no out-of-range writes, mask length preserved)', function () {
+      const W = 60, H = 60
+      const seed = seedBlock(W, H, 2, 2, 5, 5) // near top-left -> negative-offset stamps get clamped
+      const r = engine.propagateMask(seed, W, H, [{ x: 20, y: 0 }, { x: 0, y: 20 }])
+      assert.strictEqual(r.mask.length, W * H, 'mask length unchanged')
+      assert.strictEqual(r.mask[2 * W + 2], 1, 'seed still present')
+      assert.ok(countSet(r.mask) > 0, 'something stamped')
+    })
+
+    it('is OR-idempotent: re-running yields an identical mask + instance count', function () {
+      const W = 80, H = 80
+      const seed = seedBlock(W, H, 5, 5, 6, 6)
+      const a = engine.propagateMask(seed, W, H, [{ x: 24, y: 0 }, { x: 0, y: 24 }])
+      const b = engine.propagateMask(seed, W, H, [{ x: 24, y: 0 }, { x: 0, y: 24 }])
+      assert.strictEqual(a.instances, b.instances)
+      assert.deepStrictEqual(Array.from(a.mask), Array.from(b.mask))
+    })
+
+    it('degenerate / missing basis returns just the seed (instances:1)', function () {
+      const W = 50, H = 50
+      const seed = seedBlock(W, H, 10, 10, 4, 4)
+      const r0 = engine.propagateMask(seed, W, H, [{ x: 0, y: 0 }])
+      assert.strictEqual(r0.instances, 1)
+      assert.strictEqual(countSet(r0.mask), 16, 'only the 4x4 seed remains')
+      assert.strictEqual(engine.propagateMask(seed, W, H, []).instances, 1, 'empty basis array -> seed only')
+    })
+
+    it('empty seed returns instances:0 and an empty mask', function () {
+      const W = 40, H = 40
+      const r = engine.propagateMask(new Uint8Array(W * H), W, H, [{ x: 10, y: 0 }])
+      assert.strictEqual(r.instances, 0)
+      assert.strictEqual(countSet(r.mask), 0)
+    })
+
+    it('respects the instance cap', function () {
+      const W = 120, H = 120
+      const seed = seedBlock(W, H, 1, 1, 2, 2)
+      const r = engine.propagateMask(seed, W, H, [{ x: 3, y: 0 }, { x: 0, y: 3 }], { maxInstances: 25 })
+      assert.ok(r.instances <= 25, `instances ${r.instances} must respect cap 25`)
+    })
+
+    it('flags subharmonicWarning when the basis is shorter than the seed footprint', function () {
+      const W = 80, H = 80
+      const seed = seedBlock(W, H, 10, 10, 10, 10) // 10px wide
+      assert.strictEqual(engine.propagateMask(seed, W, H, [{ x: 5, y: 0 }]).subharmonicWarning, true,
+        'basis 5px < seed 10px -> half-period lock')
+      assert.strictEqual(engine.propagateMask(seed, W, H, [{ x: 30, y: 0 }]).subharmonicWarning, false,
+        'basis 30px > seed 10px -> clean')
+    })
+
+    it('round-trip: detectTiling basis fed to propagateMask reproduces the tiling', function () {
+      const N = 512, pitch = 40
+      const r = engine.detectTiling(stripeField(N, pitch))
+      assert.strictEqual(r.tiling, true)
+      // Seed = one stripe instance (64x3 block) at the first in-window stripe row.
+      const seed = new Uint8Array(N * N)
+      const sx = Math.floor(N / 2 - 32), sy = Math.floor(pitch / 2)
+      for (let yy = sy - 1; yy <= sy + 1; yy++) for (let x = sx; x < sx + 64; x++) seed[yy * N + x] = 1
+      const prop = engine.propagateMask(seed, N, N, r.tileBasis)
+      assert.ok(prop.instances >= 5, `expected several stamped rows, got ${prop.instances}`)
+      assert.strictEqual(prop.mask[(sy + pitch) * N + sx], 1, 'next stripe row down is covered')
+      assert.strictEqual(prop.mask[(sy + 2 * pitch) * N + sx], 1, 'two rows down is covered')
+    })
+  })
 })

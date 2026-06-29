@@ -678,11 +678,326 @@
     return size - reached
   }
 
+  // =============================================================================================
+  // detectTiling (#50, T29 Phase 2d) — frequency-domain tiled-watermark detector.
+  //
+  // detectWatermark (above) cannot isolate a FAINT TILED watermark from photographic content —
+  // the watermark sits below the spatial edge-noise floor (LEARNINGS CORE-16). The only separable
+  // signal is its regular TILING: a periodic overlay autocorrelates as a harmonic COMB of peaks at
+  // k*fundamental along the tile direction. This block is a production port of the #49 spike
+  // (scripts/spike-fft-tiling-2.js), which proved the recipe
+  //     log1p -> high-pass -> LCN -> Hann -> autocorrelation -> comb-count gate
+  // lifts the WhatsApp class-photo targets from 2.6-2.8x (MARGINAL) to clean 5-10 peak combs.
+  //
+  // CRITICAL: gate on COMB COUNT (>= COMB_MIN collinear harmonics), NOT top-ratio. Pre-processing
+  // inflates the top peak/floor ratio for EVERYTHING, including clean photos (CORE-16 #49 addendum)
+  // — only the comb still separates real tiling from photo texture.
+  //
+  // Detection thresholds below are frozen at the spike's proven values; do NOT tune without new
+  // fixture evidence. RBIG is swept (issue #50 constraint #3) because a single high-pass radius
+  // attenuates tile periods near/above it — small/medium periods survive RBIG=48, the ~87px diagonal
+  // does not, so we try {32,64,128} and keep the strongest comb.
+  var TILING = {
+    LAG_MIN: 10,        // exclude the central zero-lag lobe (broad photo autocorrelation)
+    LAG_MAX_CAP: 200,   // largest tile period we bother with (few reps -> unreliable beyond)
+    COMB_RATIO: 2.5,    // a peak must clear this peak/floor ratio to join the harmonic-comb tally
+    COMB_MIN: 5,        // >= this many collinear harmonics (k*fundamental) == a real tiling comb
+    JPEG_LAG: 8,        // JPEG 8x8 DCT block period -> AC peak at lag 8 (a fundamental at/below
+                        // JPEG_LAG+2 is the compression grid, not a watermark)
+    TOP_N: 12,          // peaks to keep
+    RMED: 16,           // LCN local-magnitude blur radius (fixed structural choice)
+    BLUR_PASSES: 3,     // box-blur passes -> Gaussian approximation
+    RBIG_SWEEP: [32, 64, 128], // high-pass radii to try (filtered to <= N/2 at call time)
+    N_CAP: 512,         // analysis window cap (largest po2 we analyse)
+    N_FLOOR: 64         // below this a >=4-harmonic comb cannot fit the annulus
+  }
+
+  // Largest power-of-2 <= v.
+  function po2Floor (v) {
+    var p = 1
+    while (p * 2 <= v) p *= 2
+    return p
+  }
+
+  // 1D radix-2 iterative FFT (in place); inverse = conjugate twiddle, caller divides by n. Ported
+  // verbatim from the spike (operates on re.length, so it is already N-agnostic).
+  function fft (re, im, inverse) {
+    var n = re.length
+    for (var i = 1, j = 0; i < n; i++) {
+      var bit = n >> 1
+      for (; j & bit; bit >>= 1) j ^= bit
+      j ^= bit
+      if (i < j) {
+        var tr = re[i]; re[i] = re[j]; re[j] = tr
+        var ti = im[i]; im[i] = im[j]; im[j] = ti
+      }
+    }
+    for (var len = 2; len <= n; len <<= 1) {
+      var ang = (inverse ? 2 : -2) * Math.PI / len
+      var wr = Math.cos(ang), wi = Math.sin(ang)
+      for (var s = 0; s < n; s += len) {
+        var cwr = 1, cwi = 0, half = len >> 1
+        for (var k = 0; k < half; k++) {
+          var a = s + k, b = s + k + half
+          var xr = re[b] * cwr - im[b] * cwi
+          var xi = re[b] * cwi + im[b] * cwr
+          re[b] = re[a] - xr; im[b] = im[a] - xi
+          re[a] = re[a] + xr; im[a] = im[a] + xi
+          var ncwr = cwr * wr - cwi * wi
+          cwi = cwr * wi + cwi * wr
+          cwr = ncwr
+        }
+      }
+    }
+  }
+
+  // 2D FFT over NxN planes: transform every row then every column. `lineRe`/`lineIm` are caller-
+  // supplied length-N scratch (pre-allocated once — GC note in the dev plan). Inverse divides by N*N.
+  function fft2 (re, im, inverse, N, lineRe, lineIm) {
+    var x, y
+    for (y = 0; y < N; y++) {
+      var off = y * N
+      for (x = 0; x < N; x++) { lineRe[x] = re[off + x]; lineIm[x] = im[off + x] }
+      fft(lineRe, lineIm, inverse)
+      for (x = 0; x < N; x++) { re[off + x] = lineRe[x]; im[off + x] = lineIm[x] }
+    }
+    for (x = 0; x < N; x++) {
+      for (y = 0; y < N; y++) { lineRe[y] = re[y * N + x]; lineIm[y] = im[y * N + x] }
+      fft(lineRe, lineIm, inverse)
+      for (y = 0; y < N; y++) { re[y * N + x] = lineRe[y]; im[y * N + x] = lineIm[y] }
+    }
+    if (inverse) { var s = 1 / (N * N); for (var i = 0; i < N * N; i++) { re[i] *= s; im[i] *= s } }
+  }
+
+  // Centred NxN luminance crop (edge-clamped). Reads imageData.data (RGBA) directly. `region`
+  // (clamped {x,y,width,height}) recentres the window; default = image centre.
+  function lumaWindow (imageData, N, region) {
+    var data = imageData.data, W = imageData.width, H = imageData.height
+    var cx, cy
+    if (region) { cx = region.x + region.width / 2; cy = region.y + region.height / 2 }
+    else { cx = W / 2; cy = H / 2 }
+    var ox = Math.floor(cx - N / 2), oy = Math.floor(cy - N / 2)
+    var out = new Float64Array(N * N)
+    for (var y = 0; y < N; y++) {
+      var sy = Math.min(H - 1, Math.max(0, oy + y))
+      for (var x = 0; x < N; x++) {
+        var sx = Math.min(W - 1, Math.max(0, ox + x))
+        var o = (sy * W + sx) * 4
+        out[y * N + x] = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2]
+      }
+    }
+    return out
+  }
+
+  // Separable box blur, BLUR_PASSES passes (~Gaussian), edge-clamped, over the NxN plane. Allocation-
+  // free: copies `src` into `out` and uses `tmp` as the horizontal-pass scratch; result ends in `out`.
+  function boxBlur (src, r, N, out, tmp) {
+    var i
+    for (i = 0; i < N * N; i++) out[i] = src[i]
+    var win = 2 * r + 1, pass, x, y
+    for (pass = 0; pass < TILING.BLUR_PASSES; pass++) {
+      for (y = 0; y < N; y++) {                       // horizontal: out -> tmp
+        var off = y * N, sum = 0, k, ii
+        for (k = -r; k <= r; k++) { ii = k < 0 ? 0 : (k >= N ? N - 1 : k); sum += out[off + ii] }
+        for (x = 0; x < N; x++) {
+          tmp[off + x] = sum / win
+          var rem = x - r; rem = rem < 0 ? 0 : rem
+          var add = x + r + 1; add = add >= N ? N - 1 : add
+          sum += out[off + add] - out[off + rem]
+        }
+      }
+      for (x = 0; x < N; x++) {                        // vertical: tmp -> out
+        var sum2 = 0, k2, jj
+        for (k2 = -r; k2 <= r; k2++) { jj = k2 < 0 ? 0 : (k2 >= N ? N - 1 : k2); sum2 += tmp[jj * N + x] }
+        for (y = 0; y < N; y++) {
+          out[y * N + x] = sum2 / win
+          var rem2 = y - r; rem2 = rem2 < 0 ? 0 : rem2
+          var add2 = y + r + 1; add2 = add2 >= N ? N - 1 : add2
+          sum2 += tmp[add2 * N + x] - tmp[rem2 * N + x]
+        }
+      }
+    }
+  }
+
+  // The #49 GO recipe (in mandated order — constraint #2): log1p on RAW positive luma FIRST, then
+  // high-pass (subtract blur, radius rbig), then LCN (divide by blurred local magnitude, RMED). Writes
+  // the result into pool.work and returns it. Uses pool.blur + pool.tmp as blur scratch, pool.mag for
+  // the LCN magnitude — all pre-allocated, so the 3-radius sweep allocates nothing per iteration.
+  function preprocess (luma, rbig, N, pool) {
+    var work = pool.work, i
+    for (i = 0; i < N * N; i++) work[i] = Math.log1p(luma[i])         // log1p (raw positive luma)
+    boxBlur(work, rbig, N, pool.blur, pool.tmp)                       // high-pass: subtract blur
+    for (i = 0; i < N * N; i++) work[i] = work[i] - pool.blur[i]
+    var mag = pool.mag, meanMag = 0                                   // LCN
+    for (i = 0; i < N * N; i++) { mag[i] = Math.abs(work[i]); meanMag += mag[i] }
+    meanMag /= mag.length
+    boxBlur(mag, TILING.RMED, N, pool.blur, pool.tmp)                 // local magnitude -> pool.blur
+    var eps = 1e-3 * meanMag + 1e-9                                   // numerical floor, NOT a threshold
+    for (i = 0; i < N * N; i++) work[i] = work[i] / (pool.blur[i] + eps)
+    return work
+  }
+
+  // Detrend (subtract mean) + separable 2D Hann window to suppress crop-edge spectral leakage. Writes
+  // into pool.windowed (a dedicated plane so autocorrelation can copy from it without clobbering work).
+  function detrendHann (luma, N, pool) {
+    var mean = 0, i
+    for (i = 0; i < N * N; i++) mean += luma[i]
+    mean /= N * N
+    var hann = pool.hann
+    for (i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)))
+    var out = pool.windowed
+    for (var y = 0; y < N; y++) for (var x = 0; x < N; x++) out[y * N + x] = (luma[y * N + x] - mean) * hann[y] * hann[x]
+    return out
+  }
+
+  // AC = IFFT(|FFT(windowed)|^2). Returns the DC(zero-lag)-centred real autocorrelation in pool.ac,
+  // normalised so zero-lag = 1. (The spike also returned the shifted power spectrum for PNG evidence;
+  // the engine drops it — nothing reads it here.)
+  function autocorrelation (windowed, N, pool) {
+    var re = pool.re, im = pool.im, i
+    for (i = 0; i < N * N; i++) { re[i] = windowed[i]; im[i] = 0 }
+    fft2(re, im, false, N, pool.lineRe, pool.lineIm)
+    for (i = 0; i < N * N; i++) { re[i] = re[i] * re[i] + im[i] * im[i]; im[i] = 0 } // power spectrum
+    fft2(re, im, true, N, pool.lineRe, pool.lineIm) // inverse -> circular autocorrelation, zero-lag [0,0]
+    var ac = pool.ac, zero = re[0] || 1
+    for (var y = 0; y < N; y++) {
+      var sy = (y + N / 2) % N
+      for (var x = 0; x < N; x++) {
+        var sx = (x + N / 2) % N
+        ac[sy * N + sx] = re[y * N + x] / zero // normalise zero-lag -> 1, centre the lattice
+      }
+    }
+    return ac
+  }
+
+  function median (arr) {
+    var a = Float64Array.from(arr).sort()
+    var n = a.length
+    return n % 2 ? a[(n - 1) / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2])
+  }
+
+  // Strongest secondary AC peaks (3x3 local maxima) in the lag annulus [LAG_MIN, lagMax], upper
+  // half-plane (each physical lag once). Returns the TOP_N peaks ranked by AC value + the local AC
+  // noise floor (median over the annulus).
+  function acPeaks (ac, N, lagMax) {
+    var cy = N / 2, cx = N / 2, vals = [], peaks = [], lagMin = TILING.LAG_MIN
+    for (var y = 1; y < N - 1; y++) {
+      var dy = y - cy
+      for (var x = 1; x < N - 1; x++) {
+        var dx = x - cx, r2 = dx * dx + dy * dy
+        if (r2 < lagMin * lagMin || r2 > lagMax * lagMax) continue
+        vals.push(Math.abs(ac[y * N + x]))
+        if (dy < 0 || (dy === 0 && dx <= 0)) continue // upper half-plane dedupe
+        var v = ac[y * N + x]
+        if (v < ac[(y - 1) * N + x] || v < ac[(y + 1) * N + x] ||
+            v < ac[y * N + x - 1] || v < ac[y * N + x + 1] ||
+            v < ac[(y - 1) * N + x - 1] || v < ac[(y - 1) * N + x + 1] ||
+            v < ac[(y + 1) * N + x - 1] || v < ac[(y + 1) * N + x + 1]) continue
+        peaks.push({ lx: dx, ly: dy, v: v })
+      }
+    }
+    var floor = median(vals) || 1e-9
+    peaks.sort(function (a, b) { return b.v - a.v })
+    return { peaks: peaks.slice(0, TILING.TOP_N), floor: floor }
+  }
+
+  // HARMONIC-COMB SCORE — the key signal. Take the smallest-lag strong peak as the fundamental, then
+  // count strong peaks whose lag is (a) a near-integer multiple of the fundamental AND (b) roughly
+  // collinear with it. >= COMB_MIN such peaks == real tiling.
+  function combScore (peaks, floor, ratio) {
+    var strong = peaks.filter(function (p) { return p.v / floor >= ratio })
+    if (!strong.length) return { count: 0, fund: null, fr: 0 }
+    var fund = strong[0]
+    for (var i = 1; i < strong.length; i++) {
+      if (Math.hypot(strong[i].lx, strong[i].ly) < Math.hypot(fund.lx, fund.ly)) fund = strong[i]
+    }
+    var fr = Math.hypot(fund.lx, fund.ly) || 1
+    var dirx = fund.lx / fr, diry = fund.ly / fr, count = 0
+    for (var p = 0; p < strong.length; p++) {
+      var r = Math.hypot(strong[p].lx, strong[p].ly)
+      var k = r / fr
+      var collinear = Math.abs((strong[p].lx * dirx + strong[p].ly * diry) / r)
+      if (Math.abs(k - Math.round(k)) <= 0.2 && collinear > 0.85) count++
+    }
+    return { count: count, fund: fund, fr: fr }
+  }
+
+  /**
+   * detectTiling — does this image contain a periodic TILED watermark?
+   *
+   * Frequency-domain detector (see the block comment above). Pure + Node-testable: reads
+   * imageData.data, allocates only its own scratch, mutates nothing. Gates on harmonic-comb count.
+   *
+   * PERF: a 512x512 2D FFT swept over 3 high-pass radii is heavy (~hundreds of ms in-browser). This
+   * is a DELIBERATE on-demand call — never run it live/per-frame (Web-Worker offload is backlog #43).
+   *
+   * @param {ImageData|{data,width,height}} imageData  RGBA buffer. NOT mutated (read-only).
+   * @param {object} [options]  region: optional {x,y,width,height} to recentre the analysis window.
+   * @returns {{tiling:boolean, period:number, combCount:number, topRatio:number,
+   *            confidence:number, rbig:number}}
+   *        tiling is the contract. period = fundamental lag (px). combCount = collinear harmonics at
+   *        the winning radius. topRatio = strongest AC peak/floor (DIAGNOSTIC ONLY — not the gate).
+   *        confidence in [0,1]. rbig = winning high-pass radius (NOT a spatial scale).
+   */
+  function detectTiling (imageData, options) {
+    var opt = options || {}
+    var region = opt.region ? clampRegion(opt.region, imageData.width, imageData.height) : null
+    var avail = region ? Math.min(region.width, region.height) : Math.min(imageData.width, imageData.height)
+    var N = po2Floor(Math.min(avail, TILING.N_CAP))
+    var empty = { tiling: false, period: 0, combCount: 0, topRatio: 0, confidence: 0, rbig: 0 }
+    if (N < TILING.N_FLOOR) return empty // too small to host a >=4-harmonic comb
+
+    var lagMax = Math.min(TILING.LAG_MAX_CAP, N / 2 - 2)
+    var base = lumaWindow(imageData, N, region)
+    // Pre-allocate the scratch pool ONCE (dev-plan GC note): the radius sweep reuses these planes —
+    // it must NOT allocate Float64Array(N*N) per iteration.
+    var pool = {
+      work: new Float64Array(N * N), blur: new Float64Array(N * N), tmp: new Float64Array(N * N),
+      mag: new Float64Array(N * N), windowed: new Float64Array(N * N),
+      re: new Float64Array(N * N), im: new Float64Array(N * N), ac: new Float64Array(N * N),
+      lineRe: new Float64Array(N), lineIm: new Float64Array(N), hann: new Float64Array(N)
+    }
+
+    // Sweep the high-pass radii (<= N/2) and keep the best result. "Best" prefers a TILING-valid
+    // result (so a real comb at one radius is not masked by a higher-count JPEG-grid comb at another),
+    // then higher comb count, then higher top-ratio.
+    var radii = TILING.RBIG_SWEEP.filter(function (r) { return r <= N / 2 })
+    if (!radii.length) radii = [Math.max(8, Math.floor(N / 4))] // tiny window fallback
+    var best = null
+    for (var ri = 0; ri < radii.length; ri++) {
+      var windowed = detrendHann(preprocess(base, radii[ri], N, pool), N, pool)
+      var ac = autocorrelation(windowed, N, pool)
+      var pk = acPeaks(ac, N, lagMax)
+      var comb = combScore(pk.peaks, pk.floor, TILING.COMB_RATIO)
+      var fundLag = comb.fund ? Math.round(comb.fr) : 0
+      var cleanScale = fundLag > TILING.JPEG_LAG + 2 // reject the JPEG 8px grid
+      var topRatio = pk.peaks.length ? pk.peaks[0].v / pk.floor : 0
+      var m = {
+        tiling: comb.count >= TILING.COMB_MIN && cleanScale,
+        period: fundLag, combCount: comb.count, topRatio: topRatio, rbig: radii[ri]
+      }
+      if (best === null ||
+          (m.tiling && !best.tiling) ||
+          (m.tiling === best.tiling && m.combCount > best.combCount) ||
+          (m.tiling === best.tiling && m.combCount === best.combCount && m.topRatio > best.topRatio)) {
+        best = m
+      }
+    }
+
+    // confidence: ~0.17 at the gate (COMB_MIN), saturating to 1 at ~10 combs. Uses COMB_MIN-1 as the
+    // zero anchor (one below the gate) so the confidence is non-zero for any tiling:true result.
+    // Zeroed when not tiling (mirrors detectWatermark's [0,1] convention).
+    best.confidence = best.tiling
+      ? Math.max(0, Math.min((best.combCount - TILING.COMB_MIN + 1) / (10 - TILING.COMB_MIN + 1), 1)) : 0
+    return best
+  }
+
   return {
     rgbToLab: rgbToLab,
     deltaE76: deltaE76,
     replaceColour: replaceColour,
     smartFill: smartFill,
-    detectWatermark: detectWatermark
+    detectWatermark: detectWatermark,
+    detectTiling: detectTiling
   }
 })

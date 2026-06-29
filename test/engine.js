@@ -637,4 +637,110 @@ describe('recolour engine', function () {
         'square shape must survive default levers (no aspect gate, no blur)')
     })
   })
+
+  describe('detectTiling (#50)', function () {
+    // [TRAP]: Synthetic comb won't form at N=256 — at 25px pitch, 25+ AC lattice peaks (x+y+diagonal
+    // harmonics) compete for TOP_N=12; higher x-axis harmonics (75,100,125px) get crowded out and
+    // combCount stays 2. Fix: raise to N=512 (plan option a — no COMB_MIN contract change). Engine's
+    // real-image path always resolves N=512 for images >= 512px; this window matches production use.
+    //
+    // 512x512 field so N=512, LAG_MAX = min(200, 254) = 200.
+    // pitch = floor(200/5) = 40px: harmonics at 40/80/120/160/200 — five inside [LAG_MIN=10, 200].
+    this.timeout(15000) // 3 radius sweeps × N=512 2D FFT ≈ 500ms/call; 15s covers the battery
+    const TILE_N = 512
+    const TILE_PITCH = 40 // floor(LAG_MAX/5) with LAG_MAX=200
+
+    // [TRAP]: A perfectly symmetric 2D dot grid (marks at every (kx*pitch, ky*pitch)) is a degenerate
+    // synthetic: it generates 25 AC peaks in the upper half-plane, all entering the sort together.
+    // TOP_N=12 keeps only the 12 strongest — diagonal peaks (-40,40),(80,40),(-80,80),(80,80) etc.
+    // outcompete x-axis harmonics beyond lag=80px, so combCount stays 2. Real tiled watermarks (text
+    // repeating in one direction) are NOT symmetric 2D grids and do not hit this. Fix: use short
+    // horizontal STRIPES (3px tall, 64px wide, centred in x) — periodic in y only — which produce a
+    // clean 5-peak axis-aligned y-comb well within TOP_N. TILE_N kept at 512 (plan option a).
+    function solidTile (w, h, rgb) {
+      const data = new Uint8ClampedArray(w * h * 4)
+      for (let i = 0; i < w * h; i++) {
+        data[i * 4] = rgb[0]; data[i * 4 + 1] = rgb[1]; data[i * 4 + 2] = rgb[2]; data[i * 4 + 3] = 255
+      }
+      return { data, width: w, height: h }
+    }
+    function rectTile (img, x0, y0, x1, y1, rgb) {
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const o = (y * img.width + x) * 4
+          img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]
+        }
+      }
+    }
+    // Short horizontal stripes: 3px tall, STRIPE_W px wide, centred in x, every pitch pixels in y.
+    // Periodic in y only → axis-aligned AC comb at (0, k*pitch) — no competing 2D diagonal lattice.
+    // STRIPE_W must be < W so x-neighbours have strictly lower AC (ensuring 2D local maxima).
+    const STRIPE_W = 64
+    function tiledStripes (img, pitch, fg, xOffset) {
+      const W = img.width, H = img.height
+      const x0 = Math.max(0, Math.floor(W / 2 - STRIPE_W / 2) + (xOffset || 0))
+      const x1 = Math.min(W - 1, x0 + STRIPE_W - 1)
+      for (let cy = Math.floor(pitch / 2); cy < H; cy += pitch) {
+        rectTile(img, x0, Math.max(0, cy - 1), x1, Math.min(H - 1, cy + 1), fg)
+      }
+    }
+
+    it('detects a regularly tiled synthetic mark: tiling true, combCount >= 4, period near pitch', function () {
+      // Horizontal stripes periodic in y → clean axis-aligned AC comb at (0, k*TILE_PITCH).
+      const img = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      tiledStripes(img, TILE_PITCH, [80, 80, 80])
+      const r = engine.detectTiling(img)
+      assert.strictEqual(r.tiling, true, `expected tiling:true, got combCount=${r.combCount} topRatio=${r.topRatio.toFixed(2)}x period=${r.period}px`)
+      assert.ok(r.combCount >= 4, `combCount should be >= 4, got ${r.combCount}`)
+      assert.ok(r.period > 0, 'period must be > 0')
+      assert.ok(Math.abs(r.period - TILE_PITCH) / TILE_PITCH <= 0.2,
+        `period ${r.period}px should be within 20% of pitch ${TILE_PITCH}px`)
+    })
+
+    it('returns tiling false on a flat field (no periodic signal)', function () {
+      const img = solidTile(TILE_N, TILE_N, [128, 128, 128])
+      const r = engine.detectTiling(img)
+      assert.strictEqual(r.tiling, false, 'flat field must not trigger tiling detection')
+      assert.strictEqual(r.combCount, 0)
+    })
+
+    it('returns tiling false on a single isolated blob (no repeating pattern)', function () {
+      const img = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      rectTile(img, TILE_N / 2 - 8, TILE_N / 2 - 8, TILE_N / 2 + 8, TILE_N / 2 + 8, [80, 80, 80])
+      const r = engine.detectTiling(img)
+      assert.strictEqual(r.tiling, false, 'single blob must not be classified as tiling')
+    })
+
+    it('honours region: stripes outside the region are not detected', function () {
+      // Stripes centred in the RIGHT QUARTER (xOffset=TILE_N/4). Region covers only the LEFT half.
+      // The analysis window for the left-half region is centred at x=TILE_N/4 (N=256), which lands
+      // in x=[0,TILE_N/2-1] — the stripes at x≈TILE_N*3/4 are outside the window.
+      const img = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      tiledStripes(img, TILE_PITCH, [80, 80, 80], TILE_N / 4) // shift stripes to right quarter
+      const rLeft = engine.detectTiling(img, { region: { x: 0, y: 0, width: TILE_N / 2, height: TILE_N } })
+      assert.strictEqual(rLeft.tiling, false, 'stripes outside the region must not be detected')
+    })
+
+    it('is deterministic: identical inputs return identical results', function () {
+      const img = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      tiledStripes(img, TILE_PITCH, [80, 80, 80])
+      const r1 = engine.detectTiling(img)
+      const r2 = engine.detectTiling(img)
+      assert.strictEqual(r1.tiling, r2.tiling)
+      assert.strictEqual(r1.combCount, r2.combCount)
+      assert.strictEqual(r1.period, r2.period)
+    })
+
+    it('confidence is 0 when not tiling, and in [0,1] when tiling', function () {
+      const flat = solidTile(TILE_N, TILE_N, [128, 128, 128])
+      assert.strictEqual(engine.detectTiling(flat).confidence, 0, 'confidence must be 0 when tiling:false')
+
+      const tiled = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      tiledStripes(tiled, TILE_PITCH, [80, 80, 80])
+      const rc = engine.detectTiling(tiled)
+      if (rc.tiling) {
+        assert.ok(rc.confidence > 0 && rc.confidence <= 1, `confidence ${rc.confidence} must be in (0,1]`)
+      }
+    })
+  })
 })

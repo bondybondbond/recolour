@@ -1,0 +1,82 @@
+Text-watermark NCC detection SPIKE (#53) — 2026-06-30T22:52:39.432Z
+WORK_MAX=1024  EPS=1e-10  cutoffs=0.4/0.5/0.6/0.7  NMS=anisotropic(tw,th)  pitchTol=18%/18deg
+Local-normalisation window W = template footprint (intrinsic to fast-NCC; not a free knob).
+
+=== TARGET TAYLOR GALE grid ===
+  working 900x600 (scale 1.000)  template 180x48 @ (360,24)  NMS=180x48
+  cutoff  peaks           pitch   score  lattice
+     0.4     12   (0,113) |113|    1.00  YES
+     0.5      6   (0,113) |113|    0.67  YES
+     0.6      4   (0,113) |113|    1.00  YES
+     0.7      4   (0,113) |113|    1.00  YES
+
+=== TARGET Delete-me dense grid ===
+  working 1024x558 (scale 0.855)  template 77x22 @ (10,14)  NMS=77x22
+  cutoff  peaks           pitch   score  lattice
+     0.4    155     (0,25) |25|    1.00  YES
+     0.5    154     (0,25) |25|    1.00  YES
+     0.6    149     (0,25) |25|    0.99  YES
+     0.7    105     (0,25) |25|    0.88  YES
+
+=== TARGET @Watermark diagonal (busy photo) ===
+  working 1024x799 (scale 0.938)  template 200x72 @ (384,52)  NMS=200x72
+  cutoff  peaks           pitch   score  lattice
+     0.4      7  (104,-158) |189|    0.29  no
+     0.5      3  (146,81) |167|    0.67  YES
+     0.6      1               —    0.00  no
+     0.7      1               —    0.00  no
+
+=== NEG single Copyright (watermark, NOT tiled) ===
+  working 800x533 (scale 1.000)  template 384x47 @ (360,251)  NMS=384x47
+  cutoff  peaks           pitch   score  lattice
+     0.4      6  (109,-53) |121|    0.17  no
+     0.5      6  (109,-53) |121|    0.17  no
+     0.6      6  (109,-53) |121|    0.17  no
+     0.7      6  (109,-53) |121|    0.17  no
+
+=== NEG flying-eagle photo (no watermark) ===
+  working 1024x576 (scale 0.133)  template 184x70 @ (410,230)  NMS=184x70
+  cutoff  peaks           pitch   score  lattice
+     0.4      6  (186,12) |186|    0.33  no
+     0.5      4  (56,180) |189|    0.25  no
+     0.6      1               —    0.00  no
+     0.7      1               —    0.00  no
+
+=== NEG kids1 photo (no watermark) ===
+  working 840x560 (scale 1.000)  template 151x67 @ (336,213)  NMS=151x67
+  cutoff  peaks           pitch   score  lattice
+     0.4      2    (41,75) |85|    1.00  no
+     0.5      1               —    0.00  no
+     0.6      1               —    0.00  no
+     0.7      1               —    0.00  no
+
+=== NEG kids2 photo (no watermark) ===
+  working 840x560 (scale 1.000)  template 151x67 @ (336,213)  NMS=151x67
+  cutoff  peaks           pitch   score  lattice
+     0.4      2   (201,4) |201|    1.00  no
+     0.5      1               —    0.00  no
+     0.6      1               —    0.00  no
+     0.7      1               —    0.00  no
+
+=== CUTOFF SEPARATION (targets must latch, negatives must not) ===
+  cutoff 0.4:  targets latched 2/3   negatives latched 0/4
+  cutoff 0.5:  targets latched 3/3   negatives latched 0/4   <- CLEAN
+  cutoff 0.6:  targets latched 2/3   negatives latched 0/4
+  cutoff 0.7:  targets latched 2/3   negatives latched 0/4
+
+=== GO / NO-GO ===
+  GO — at NCC cutoff 0.5, all 3 tiled-text targets reach a >=3-instance consistent-pitch lattice AND every negative control (clean photos + the single non-tiled Copyright mark) stays below the lattice gate. FFT-based NCC of the user seed template recovers text-watermark instances that the FFT comb misses on a one-instance region. Proceed to an engine build.
+
+=== BUILD HAND-OFF (recommended parameters for the follow-up engine fn) ===
+  NCC cutoff:            0.5
+  NMS:                   anisotropic (dx<template_w AND dy<template_h) — isotropic
+                         max(tw,th) over-suppresses short axes on wide-short text crops
+  Normalisation window:  template footprint (tw x th) — fast-NCC local mean/variance window;
+                         NOT a free LCN radius, so the #49 W-tuning trap does not apply here.
+  EPS denominator guard: 1e-10  (flat template/region -> 0, never NaN)
+  Lattice gate:          >=3 peaks AND pitch-consistency score >=0.5
+  Proposed shape:        detectTextTiling(imageData, seedBbox) -> { instances, tileBasis,
+                         confidence } with tileBasis compatible with propagateMask(); wire as
+                         the runTile() fallback when detectTiling().combCount < COMB_MIN.
+
+Evidence (seed crops, NCC heatmaps, peak overlays + this log) -> C:\apps\recolour\scripts\evidence\spike-text-ncc

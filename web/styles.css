@@ -192,8 +192,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   background: rgba(0, 0, 0, 0.78); border: 1px solid var(--border); border-radius: 12px;
   padding: 12px 14px; backdrop-filter: blur(12px); pointer-events: auto;
 }
-.tile-confirm-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.tile-count { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+/* flex-wrap + min-width:0 so the longer "N instances · R rows × C columns" count (#47) drops the band
+   to a second line / wraps instead of overflowing the 340px card (WORKFLOW-8). */
+.tile-confirm-row { display: flex; align-items: center; justify-content: space-between; gap: 6px 10px; flex-wrap: wrap; }
+.tile-count { font-size: 13px; font-weight: 600; color: var(--text); min-width: 0; }
 .tile-band { font-size: 11px; color: var(--muted); text-align: right; }
 /* Confidence band at/below the detection gate (combCount <= 5) — same amber as the #31 hint. */
 .tile-band.warn { color: #ffb454; }

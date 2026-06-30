@@ -1113,12 +1113,16 @@
    * @param {Array<{x:number,y:number}>} basis  1 or 2 image-pixel lattice vectors, e.g.
    *        detectTiling().tileBasis. 1 vector -> stamp along a line; 2 -> stamp across the 2-D grid.
    * @param {object} [opts]  maxInstances: override the PROPAGATE.MAX_INSTANCES cap.
-   * @returns {{mask:Uint8Array, instances:number, subharmonicWarning:boolean}}
+   * @returns {{mask:Uint8Array, instances:number, subharmonicWarning:boolean, rows:number, cols:number}}
    *   mask: the seed OR-stamped at every lattice node whose translated bbox overlaps the image,
    *         clamped to bounds.
    *   instances: TOTAL stamped copies INCLUDING the seed (node (0,0)). A seed with pixels but no valid
    *         basis returns 1, never 0 — the GUI "Found N regions" pill reads this directly, so a 1 means
    *         "just the seed". An EMPTY seed (no set pixels) returns 0.
+   *   rows, cols: count of DISTINCT lattice lines that produced an in-bounds stamp — cols along v0,
+   *         rows along v1. For a 1-D basis (no v1) rows collapses to 1 and cols === instances. Empty
+   *         seed -> {rows:0, cols:0}; seed with no valid basis -> {rows:1, cols:1}. The GUI confirm card
+   *         renders these as "Found N instances · R rows × C columns" (#47, T29 Phase 3 DoD).
    *   subharmonicWarning: true when a basis vector is shorter than the seed's bbox footprint projected
    *         onto that vector's direction. That is the FFT half-period lock (detectTiling can lock onto
    *         half the true period when the watermark has internal symmetry) — stamps would overlap
@@ -1142,7 +1146,7 @@
       if (y < miny) miny = y
       if (y > maxy) maxy = y
     }
-    if (!cx.length) return { mask: out, instances: 0, subharmonicWarning: false } // empty seed
+    if (!cx.length) return { mask: out, instances: 0, subharmonicWarning: false, rows: 0, cols: 0 } // empty seed
 
     // Keep only non-degenerate basis vectors.
     var vecs = []
@@ -1155,7 +1159,7 @@
     // No usable basis -> nothing to propagate; return just the seed (instances:1).
     if (!vecs.length) {
       for (var s0 = 0; s0 < cx.length; s0++) out[cy[s0] * width + cx[s0]] = 1
-      return { mask: out, instances: 1, subharmonicWarning: false }
+      return { mask: out, instances: 1, subharmonicWarning: false, rows: 1, cols: 1 }
     }
 
     // Sub-harmonic guard: project the seed bbox onto each basis direction; if the vector is shorter
@@ -1175,6 +1179,12 @@
     var iMax = Math.ceil(diag / v0.mag) + 1
     var jMax = v1 ? Math.ceil(diag / v1.mag) + 1 : 0
     var instances = 0
+    // Count DISTINCT lattice lines that produced an in-bounds stamp: cols = distinct i (along v0),
+    // rows = distinct j (along v1). Cheap fixed-size seen-flags keyed by (index + max) — for a 1-D
+    // basis jMax=0 so rows collapses to 1. Surfaced in the GUI confirm card (#47).
+    var iSeen = new Uint8Array(2 * iMax + 1)
+    var jSeen = new Uint8Array(2 * jMax + 1)
+    var cols = 0, rows = 0
     for (var i = -iMax; i <= iMax; i++) {
       for (var j = -jMax; j <= jMax; j++) {
         var ox = Math.round(i * v0.x + (v1 ? j * v1.x : 0))
@@ -1182,6 +1192,8 @@
         // Only stamp nodes whose translated bbox actually overlaps the image.
         if (maxx + ox < 0 || minx + ox >= width || maxy + oy < 0 || miny + oy >= height) continue
         instances++
+        if (!iSeen[i + iMax]) { iSeen[i + iMax] = 1; cols++ }
+        if (!jSeen[j + jMax]) { jSeen[j + jMax] = 1; rows++ }
         for (var s = 0; s < cx.length; s++) {
           var nx = cx[s] + ox, ny = cy[s] + oy
           if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
@@ -1190,7 +1202,7 @@
         if (instances >= maxInstances) { i = iMax + 1; break } // hard cap — abandon the rest of the sweep
       }
     }
-    return { mask: out, instances: instances, subharmonicWarning: subharmonicWarning }
+    return { mask: out, instances: instances, subharmonicWarning: subharmonicWarning, rows: rows, cols: cols }
   }
 
   return {

@@ -1119,12 +1119,14 @@
       propMask: prop.mask,
       instances: prop.instances,
       sub: prop.subharmonicWarning,
+      rows: prop.rows,
+      cols: prop.cols,
       combCount: t.combCount,
       basis: t.tileBasis,
       tileDoubled: false
     }
     paintTileOverlay(prop.mask)
-    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning)
+    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols)
     restoreDetectHint() // clear the "detecting…" notice — the card now carries the status
   }
 
@@ -1160,8 +1162,18 @@
   // Confirm card: instance-count pill + confidence band (HARD requirement, #52). The band is driven
   // by combCount, NOT a binary tiling flag — WhatsApp .19 (a real target) sits at combCount=5, exactly
   // at the detection gate, so a true/false pill would hide false negatives (LEARNINGS #50/#51).
-  function showTileConfirm (combCount, instances, sub) {
-    tileCount.textContent = 'Found ' + instances + ' instance' + (instances === 1 ? '' : 's')
+  // Format the instance-count pill with the lattice geometry (#47, T29 Phase 3 DoD). Glyphs are
+  // pinned: U+00B7 MIDDLE DOT separator with a normal space each side, U+00D7 MULTIPLICATION SIGN for
+  // the dimension join — NOT a "•" bullet or the letter "x" (both render inconsistently). A 1-D tiling
+  // (or any single lattice line) reports rows===1, so it reads "… in 1 row" rather than an R×C grid.
+  function tileCountText (instances, rows, cols) {
+    var n = 'Found ' + instances + ' instance' + (instances === 1 ? '' : 's')
+    if (rows <= 1) return n + ' in 1 row'
+    return n + ' · ' + rows + ' rows × ' + cols + ' column' + (cols === 1 ? '' : 's')
+  }
+
+  function showTileConfirm (combCount, instances, sub, rows, cols) {
+    tileCount.textContent = tileCountText(instances, rows, cols)
     if (combCount >= 6) {
       tileBand.textContent = 'Strong tiling signal'
       tileBand.classList.remove('warn')
@@ -1197,10 +1209,12 @@
     tileResult.propMask = prop2.mask
     tileResult.instances = prop2.instances
     tileResult.sub = prop2.subharmonicWarning
+    tileResult.rows = prop2.rows
+    tileResult.cols = prop2.cols
     tileResult.basis = basis2x
     tileResult.tileDoubled = true // basis no longer matches raw detectTiling — block stale reuse
     paintTileOverlay(prop2.mask)
-    tileCount.textContent = 'Found ' + prop2.instances + ' instance' + (prop2.instances === 1 ? '' : 's')
+    tileCount.textContent = tileCountText(prop2.instances, prop2.rows, prop2.cols)
     if (prop2.subharmonicWarning) {
       // Still locked after one doubling — stop here (no infinite 2× loop).
       tileSubchip.textContent = '⤢ Spacing still looks off — accept or re-box'

@@ -866,6 +866,128 @@ describe('recolour engine', function () {
     })
   })
 
+  // Anchor -> propagate (#47, T29 Phase 3 DoD). Two gaps remained after #52 shipped the FFT
+  // propagate/confirm machinery: (1) the confirm card needs the lattice geometry (rows/cols), and
+  // (2) a regression test proving anchor->propagate recovers tiled instances a per-blob pass misses.
+  // The recovery + baseline-gap math runs on a controlled 1-D-dominant synthetic (ground-truth
+  // positions, fully deterministic); a real-PNG smoke test guards the detect->propagate wiring on real
+  // FFT noise. copyright-watermark.png returns tiling:false whole-image with no instance annotations,
+  // so it CANNOT carry the recovery assertion — that is why the synthetic owns the >=80% claim.
+  describe('anchor -> propagate (#47)', function () {
+    this.timeout(15000) // detectTiling on the synthetic + the real PNG each run the N=512 FFT sweep
+
+    function seedBlock (W, H, x0, y0, w, h) {
+      const m = new Uint8Array(W * H)
+      for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) m[y * W + x] = 1
+      return m
+    }
+
+    // ---- rows/cols: count DISTINCT in-bounds lattice lines (cols along v0, rows along v1) ----
+    it('reports cols along v0 and rows along v1 for a 2-D lattice', function () {
+      const W = 200, H = 200
+      const r = engine.propagateMask(seedBlock(W, H, 5, 5, 4, 4), W, H, [{ x: 40, y: 0 }, { x: 0, y: 50 }])
+      assert.ok(r.cols >= 2 && r.rows >= 2, `expected a 2-D grid, got rows=${r.rows} cols=${r.cols}`)
+      assert.ok(r.instances <= r.rows * r.cols, 'in-bounds stamps cannot exceed rows*cols')
+    })
+
+    it('collapses rows to 1 for a 1-D basis (cols === instances)', function () {
+      const W = 200, H = 60
+      const r = engine.propagateMask(seedBlock(W, H, 5, 25, 6, 6), W, H, [{ x: 25, y: 0 }])
+      assert.strictEqual(r.rows, 1, '1-D basis -> a single row')
+      assert.strictEqual(r.cols, r.instances, 'cols must equal instances for a single line')
+    })
+
+    it('counts only in-bounds lattice lines (edge-clipped seed)', function () {
+      const W = 80, H = 80
+      const r = engine.propagateMask(seedBlock(W, H, 2, 2, 4, 4), W, H, [{ x: 20, y: 0 }, { x: 0, y: 20 }])
+      assert.ok(r.rows >= 1 && r.cols >= 1, 'at least the seed line in each axis')
+      assert.ok(r.rows * r.cols >= r.instances, 'rows*cols bounds the in-bounds stamp count')
+    })
+
+    it('empty seed -> rows:0 cols:0; degenerate/empty basis -> rows:1 cols:1', function () {
+      const W = 40, H = 40
+      const empty = engine.propagateMask(new Uint8Array(W * H), W, H, [{ x: 10, y: 0 }])
+      assert.strictEqual(empty.rows, 0); assert.strictEqual(empty.cols, 0)
+      const degen = engine.propagateMask(seedBlock(W, H, 10, 10, 4, 4), W, H, [])
+      assert.strictEqual(degen.rows, 1); assert.strictEqual(degen.cols, 1)
+    })
+
+    // ---- synthetic recovery: anchor->propagate recovers faint instances a per-blob pass misses ----
+    // A 1-D-dominant row of ST "E"-like thin glyphs at period SP. Glyph 0 is the bright ANCHOR; the
+    // rest are faint (stroke ~205 on a 230 background) so detectWatermark's edge gate misses them.
+    // NOT a 2-D dot grid (CORE-17 would crowd the comb out and return tiling:false).
+    const SN = 512, SBG = 230, SP = 32, SX0 = 40, SY = 256, ST = 12, GW = 16, GH = 20
+    function mkField () {
+      const d = new Uint8ClampedArray(SN * SN * 4)
+      for (let i = 0; i < SN * SN; i++) { d[i * 4] = SBG; d[i * 4 + 1] = SBG; d[i * 4 + 2] = SBG; d[i * 4 + 3] = 255 }
+      return { data: d, width: SN, height: SN }
+    }
+    function drawGlyph (img, gx, gy, v) {
+      const d = img.data
+      const set = (x, y) => { const o = (y * SN + x) * 4; d[o] = v; d[o + 1] = v; d[o + 2] = v }
+      for (let y = gy; y < gy + GH; y++) { set(gx, y); set(gx + 1, y) }                                  // left vertical stroke (2px)
+      for (const bar of [gy, gy + (GH >> 1), gy + GH - 2]) for (let x = gx; x < gx + GW; x++) { set(x, bar); set(x, bar + 1) } // 3 horizontal bars
+    }
+    function buildTiledField () {
+      const img = mkField(); const positions = []
+      for (let k = 0; k < ST; k++) { const gx = SX0 + k * SP; positions.push(gx); drawGlyph(img, gx, SY, k === 0 ? 60 : 205) }
+      return { img, positions }
+    }
+    function anchorMask () { // exact pixels of ONE full-intensity glyph at the anchor position
+      const m = new Uint8Array(SN * SN); const tmp = mkField(); drawGlyph(tmp, SX0, SY, 60)
+      for (let i = 0; i < SN * SN; i++) if (tmp.data[i * 4] < 150) m[i] = 1
+      return m
+    }
+    function coveredPositions (mask, positions) {
+      let n = 0
+      for (const gx of positions) {
+        let hit = false
+        for (let y = SY; y <= SY + GH && !hit; y++) for (let x = gx; x <= gx + GW; x++) { if (mask[y * SN + x]) { hit = true; break } }
+        if (hit) n++
+      }
+      return n
+    }
+
+    it('baseline gap: a per-blob pass (detectWatermark) recovers < 0.6T of the tiled instances', function () {
+      const { img, positions } = buildTiledField()
+      const dw = engine.detectWatermark(img, { edgeThreshold: 150, preContrast: false })
+      let found = 0
+      for (const gx of positions) {
+        if (dw.components.some(c => c.x1 >= gx && c.x0 <= gx + GW && c.y1 >= SY && c.y0 <= SY + GH)) found++
+      }
+      assert.ok(found < 0.6 * ST, `Phase-2 baseline must miss the faint majority: found ${found}/${ST} (ceiling ${(0.6 * ST).toFixed(1)})`)
+    })
+
+    it('recovery: anchor + propagate covers >= 80% of the tiled instances (incl. faint ones)', function () {
+      const { positions } = buildTiledField()
+      const prop = engine.propagateMask(anchorMask(), SN, SN, [{ x: SP, y: 0 }]) // ground-truth basis -> deterministic
+      const recovered = coveredPositions(prop.mask, positions)
+      assert.ok(recovered >= 0.8 * ST, `expected >= 80% recovery, got ${recovered}/${ST} (floor ${(0.8 * ST).toFixed(1)})`)
+    })
+
+    it('detectTiling recovers the synthetic period (the comb is real, not a trivially-clean signal)', function () {
+      const t = engine.detectTiling(buildTiledField().img)
+      assert.strictEqual(t.tiling, true, `expected tiling:true, got combCount=${t.combCount}`)
+      assert.ok(Math.abs(t.period - SP) <= 2, `period ${t.period} should ~= ${SP}`)
+    })
+
+    // ---- real-fixture smoke: detect->propagate wiring survives real FFT noise ----
+    it('real fixture: detectTiling yields a non-degenerate basis that propagates without crashing', async function () {
+      const _Jimp = require('jimp'); const Jimp = _Jimp.default || _Jimp // CORE-1: ESM/CJS interop
+      const jimg = await Jimp.read('./test/files/copyright-watermark.png')
+      const W = jimg.bitmap.width, H = jimg.bitmap.height
+      const t = engine.detectTiling({ data: jimg.bitmap.data, width: W, height: H })
+      assert.ok(Array.isArray(t.tileBasis) && t.tileBasis.length >= 1, 'expected a non-empty tileBasis on a real tiled image')
+      const mag = Math.hypot(t.tileBasis[0].x, t.tileBasis[0].y)
+      assert.ok(mag >= 2 && t.period > 0 && t.period < 200, `basis non-degenerate & period plausible (mag=${mag.toFixed(1)} period=${t.period})`)
+      // Feed the REAL basis to propagateMask with a small synthetic seed (< period, avoids the
+      // sub-harmonic artifact) — proves detect->propagate wiring holds on a real-sized image.
+      const prop = engine.propagateMask(seedBlock(W, H, (W / 2) | 0, (H / 2) | 0, 8, 8), W, H, t.tileBasis)
+      assert.strictEqual(prop.mask.length, W * H, 'mask length preserved on a real-sized image')
+      assert.ok(prop.instances > 1, `real basis should stamp multiple instances, got ${prop.instances}`)
+    })
+  })
+
   // fillMaskRegion (#52) — inpaint an arbitrary supplied mask, reusing smartFill's dilation + #31
   // guard + BFS geodesic core. The parity test is the regression gate for the Step-1 extraction:
   // a mask equal to smartFill's colour-match mask must reconstruct byte-identical pixels.

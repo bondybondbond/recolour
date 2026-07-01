@@ -742,6 +742,26 @@ describe('recolour engine', function () {
         assert.ok(rc.confidence > 0 && rc.confidence <= 1, `confidence ${rc.confidence} must be in (0,1]`)
       }
     })
+
+    // #53: app.js gates the NCC text fallback on `combCount < combMin` rather than a magic 5. Lock
+    // that the result carries the threshold (both the empty-default and a populated result path).
+    it('result carries combMin (single source of truth for the gate, #53)', function () {
+      const flat = solidTile(TILE_N, TILE_N, [128, 128, 128])
+      assert.strictEqual(engine.detectTiling(flat).combMin, 5, 'empty/flat result must expose combMin')
+      const tiled = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      tiledStripes(tiled, TILE_PITCH, [80, 80, 80])
+      assert.strictEqual(engine.detectTiling(tiled).combMin, 5, 'populated result must expose combMin')
+    })
+
+    // #53 [TRAP] guard: runTile() passes the SAME raw region to detectTiling and detectTextTiling, so
+    // detectTiling must not mutate the region object in place (clampRegion returns a fresh bbox).
+    it('does not mutate the passed region object (#53 trap guard)', function () {
+      const img = solidTile(TILE_N, TILE_N, [200, 200, 200])
+      const region = { x: 10, y: 20, width: 100, height: 120 }
+      const snapshot = JSON.parse(JSON.stringify(region))
+      engine.detectTiling(img, { region })
+      assert.deepStrictEqual(region, snapshot, 'region must be untouched after detectTiling')
+    })
   })
 
   describe('propagateMask / tileBasis (#46)', function () {
@@ -863,6 +883,104 @@ describe('recolour engine', function () {
       assert.ok(prop.instances >= 5, `expected several stamped rows, got ${prop.instances}`)
       assert.strictEqual(prop.mask[(sy + pitch) * N + sx], 1, 'next stripe row down is covered')
       assert.strictEqual(prop.mask[(sy + 2 * pitch) * N + sx], 1, 'two rows down is covered')
+    })
+  })
+
+  // detectTextTiling (#53) — template-matching (fast NCC) fallback for LETTER-FORM tiled watermarks
+  // the FFT comb misses. Synthetics use a textured "glyph" (internal variance is mandatory — a flat
+  // block has ~zero template energy and NCC degenerates) repeated on a regular pitch; the user's box
+  // around the FIRST glyph is the region/template. See LEARNINGS CORE-20 (anisotropic NMS) + the
+  // spike scripts/spike-text-tiling.js for the validated parameters.
+  describe('detectTextTiling (#53)', function () {
+    this.timeout(20000) // a single 2-D FFT over po2Ceil(max(W,H)); the >1024 rescale case dominates
+
+    // Mildly textured background (deterministic pseudo-noise). A PERFECTLY flat field is pathological
+    // for NCC — low-variance windows inflate correlation and spawn spurious peaks — and is unlike the
+    // textured photos the spike validated against (TEST-4: match real fixture difficulty). The texture
+    // keeps every window's variance non-trivial so non-glyph positions stay well below the cutoff.
+    function texturedImg (W, H, base, amp) {
+      const data = new Uint8ClampedArray(W * H * 4)
+      for (let i = 0; i < W * H; i++) {
+        const n = (((i * 2654435761) >>> 0) % (2 * amp + 1)) - amp
+        const v = base + n
+        data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 255
+      }
+      return { data, width: W, height: H }
+    }
+    // Stamp an asymmetric "F"-like glyph (top bar + left column + mid bar): strong internal structure
+    // so the template has real energy and every copy correlates ~1. Draws only the FG strokes, leaving
+    // the textured background between strokes — like a real semi-transparent mark over content.
+    function stampGlyph (img, x0, y0, w, h, fg) {
+      const W = img.width
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!((y < 2) || (x < 2) || (y >= (h >> 1) && y < (h >> 1) + 2 && x < w * 0.7))) continue
+          const o = ((y0 + y) * W + (x0 + x)) * 4
+          img.data[o] = fg[0]; img.data[o + 1] = fg[1]; img.data[o + 2] = fg[2]
+        }
+      }
+    }
+    const FG = [70, 70, 70]
+    function bgImg (W, H) { return texturedImg(W, H, 200, 16) }
+
+    it('detects a vertically-tiled text mark: tiling true, instances >= 3, 1-D basis ~= pitch', function () {
+      const N = 256, gw = 40, gh = 16, pitch = 44, x0 = (N >> 1) - (gw >> 1)
+      const img = bgImg(N, N)
+      for (let cy = 22; cy + gh < N; cy += pitch) stampGlyph(img, x0, cy, gw, gh, FG)
+      const r = engine.detectTextTiling(img, { x: x0, y: 22, width: gw, height: gh })
+      assert.strictEqual(r.tiling, true, `expected tiling:true (instances=${r.instances})`)
+      assert.ok(r.instances >= 3, `instances should be >= 3, got ${r.instances}`)
+      assert.ok(Array.isArray(r.tileBasis) && r.tileBasis.length >= 1, 'tileBasis must be non-empty when tiling')
+      const mag = Math.hypot(r.tileBasis[0].x, r.tileBasis[0].y)
+      assert.ok(Math.abs(mag - pitch) / pitch <= 0.15, `|tileBasis[0]| ${mag.toFixed(1)} should ~= pitch ${pitch}`)
+    })
+
+    it('tileBasis vectors are canonical (+x half-plane) and confidence is in (0,1] when tiling', function () {
+      const N = 256, gw = 40, gh = 16, pitch = 44, x0 = (N >> 1) - (gw >> 1)
+      const img = bgImg(N, N)
+      for (let cy = 22; cy + gh < N; cy += pitch) stampGlyph(img, x0, cy, gw, gh, FG)
+      const r = engine.detectTextTiling(img, { x: x0, y: 22, width: gw, height: gh })
+      r.tileBasis.forEach(v => assert.ok(v.x > 0 || (v.x === 0 && v.y > 0), `basis ${JSON.stringify(v)} not canonical`))
+      assert.ok(r.confidence > 0 && r.confidence <= 1, `confidence ${r.confidence} must be in (0,1]`)
+    })
+
+    it('returns tiling false (and confidence 0) on a clean field with no repeats', function () {
+      const img = bgImg(256, 256)
+      stampGlyph(img, 108, 120, 40, 16, FG) // a SINGLE glyph — no tiling
+      const r = engine.detectTextTiling(img, { x: 108, y: 120, width: 40, height: 16 })
+      assert.strictEqual(r.tiling, false, 'a single isolated glyph must not latch a lattice')
+      assert.deepStrictEqual(r.tileBasis, [])
+      assert.strictEqual(r.confidence, 0)
+    })
+
+    it('rescales the basis to full-image pixels when the frame is downscaled (>1024px)', function () {
+      // 1200px wide forces the WORK_MAX=1024 downscale (scale=0.853). Glyphs tiled HORIZONTALLY at
+      // 200px pitch; the working-coord pitch (~171px) must be rescaled back to ~200px on return —
+      // the #53 regression that would stamp at the wrong spacing on large images.
+      const W = 1200, H = 360, gw = 40, gh = 16, pitchX = 200, y0 = (H >> 1) - (gh >> 1)
+      const img = bgImg(W, H)
+      for (let cx = 100; cx + gw < W; cx += pitchX) stampGlyph(img, cx, y0, gw, gh, FG)
+      const r = engine.detectTextTiling(img, { x: 100, y: y0, width: gw, height: gh })
+      assert.strictEqual(r.tiling, true, `expected tiling:true (instances=${r.instances})`)
+      const mag = Math.hypot(r.tileBasis[0].x, r.tileBasis[0].y)
+      assert.ok(Math.abs(mag - pitchX) / pitchX <= 0.15,
+        `rescaled |tileBasis[0]| ${mag.toFixed(1)} should ~= full-res pitch ${pitchX} (not the ~171 working pitch)`)
+    })
+
+    it('is deterministic and does not crash on a noisy clean image (smoke)', function () {
+      const N = 200, img = texturedImg(N, N, 128, 40) // noisy, no repeating mark
+      const a = engine.detectTextTiling(img, { x: 80, y: 80, width: 40, height: 20 })
+      const b = engine.detectTextTiling(img, { x: 80, y: 80, width: 40, height: 20 })
+      assert.strictEqual(a.tiling, b.tiling, 'identical inputs -> identical verdict')
+      assert.strictEqual(typeof a.tiling, 'boolean')
+      assert.ok(Array.isArray(a.tileBasis))
+    })
+
+    it('returns empty for a degenerately small template box', function () {
+      const img = bgImg(128, 128)
+      const r = engine.detectTextTiling(img, { x: 10, y: 10, width: 2, height: 2 }) // < MIN_TEMPLATE
+      assert.strictEqual(r.tiling, false)
+      assert.deepStrictEqual(r.tileBasis, [])
     })
   })
 

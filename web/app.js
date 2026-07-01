@@ -56,6 +56,7 @@
   var tileConfirm = document.getElementById('tileConfirm')
   var tileCount = document.getElementById('tileCount')
   var tileBand = document.getElementById('tileBand')
+  var tileMode = document.getElementById('tileMode')
   var tileSubchip = document.getElementById('tileSubchip')
   var tileAccept = document.getElementById('tileAccept')
   var tileCancel = document.getElementById('tileCancel')
@@ -1113,7 +1114,18 @@
     // Seed shape = the detected watermark glyph(s) inside the user's box (edge-based, colour-agnostic).
     var seed = Engine.detectWatermark(baseImageData, DETECT_PROFILE, region).mask
     var t = Engine.detectTiling(baseImageData, { region: region })
-    var prop = Engine.propagateMask(seed, canvas.width, canvas.height, t.tileBasis)
+    var basis = t.tileBasis
+    var textMode = false, textConfidence = 0
+    // [TRAP]: `region` here is still the RAW GUI {x,y,width,height}. detectTiling's internal
+    // clampRegion() returns a FRESH bbox and does NOT mutate `region`, so the SAME `region` is correct
+    // to hand to detectTextTiling. If a future edit makes detectTiling normalise region in place, this
+    // NCC call silently gets the wrong template bbox — guarded by a regression test (test/engine.js).
+    // Do NOT pass a derived/clamped region here.
+    if (t.combCount < t.combMin) { // FFT comb failed → text/NCC fallback for letter-form marks (#53). No magic 5.
+      var tt = Engine.detectTextTiling(baseImageData, region)
+      if (tt.tiling) { basis = tt.tileBasis; textMode = true; textConfidence = tt.confidence }
+    }
+    var prop = Engine.propagateMask(seed, canvas.width, canvas.height, basis)
     tileResult = {
       seed: seed,
       propMask: prop.mask,
@@ -1122,11 +1134,13 @@
       rows: prop.rows,
       cols: prop.cols,
       combCount: t.combCount,
-      basis: t.tileBasis,
+      basis: basis,
+      textMode: textMode,
+      textConfidence: textConfidence,
       tileDoubled: false
     }
     paintTileOverlay(prop.mask)
-    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols)
+    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence)
     restoreDetectHint() // clear the "detecting…" notice — the card now carries the status
   }
 
@@ -1172,15 +1186,30 @@
     return n + ' · ' + rows + ' rows × ' + cols + ' column' + (cols === 1 ? '' : 's')
   }
 
-  function showTileConfirm (combCount, instances, sub, rows, cols) {
+  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence) {
     tileCount.textContent = tileCountText(instances, rows, cols)
-    if (combCount >= 6) {
+    if (textMode) {
+      // Text/NCC fallback path (#53): no combCount — the band is driven by the lattice-match
+      // confidence (already gated >= 0.5). The "Detected by text-shape matching" label tells the user
+      // WHY instances were found that the stripe comb missed (decided: map + label the path).
+      if (textConfidence >= 0.75) {
+        tileBand.textContent = 'Strong text-tiling match'
+        tileBand.classList.remove('warn')
+      } else {
+        tileBand.textContent = 'Text-tiling match — some instances may be missed'
+        tileBand.classList.add('warn')
+      }
+      tileMode.style.display = 'block'
+    } else if (combCount >= 6) {
+      tileMode.style.display = 'none'
       tileBand.textContent = 'Strong tiling signal'
       tileBand.classList.remove('warn')
     } else if (combCount === 5) {
+      tileMode.style.display = 'none'
       tileBand.textContent = 'Weak tiling signal — some instances may be missed'
       tileBand.classList.add('warn')
     } else {
+      tileMode.style.display = 'none'
       tileBand.textContent = 'Not detected by current threshold'
       tileBand.classList.add('warn')
     }

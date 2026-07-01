@@ -171,7 +171,7 @@ No free tool supports batch. Unmet need for photographers and designers.
 | T18   | DeltaE slider with live preview                                 | Near  |
 | ~~T16~~ | ~~Nearest-neighbour inpainting~~ ✅ Shipped (cardinal distance-weighted interpolation) | Done |
 | ~~T29 Phase 1~~ | ~~X-ray view selection aid~~ ✅ Shipped (`invert(1) contrast(1.6)` display-only canvas toggle) | Done |
-| T29 Phase 2 | Text-pattern detection (edge detection + connected components to find watermark text blobs) | Far |
+| ~~T29 Phase 2~~ | ~~Text-pattern detection~~ ✅ Shipped (fast-NCC template-matching `detectTextTiling()` fallback for letter-form tiled marks, wired into the tile-fill confirm flow) | Done |
 | T19   | Content-aware fill (OpenCV/Python)                              | Far   |
 
 ---

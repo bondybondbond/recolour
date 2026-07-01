@@ -199,6 +199,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .tile-band { font-size: 11px; color: var(--muted); text-align: right; }
 /* Confidence band at/below the detection gate (combCount <= 5) — same amber as the #31 hint. */
 .tile-band.warn { color: #ffb454; }
+/* Path label shown only when the text/NCC fallback (not the stripe comb) found the tiling (#53). */
+.tile-mode { font-size: 11px; color: var(--muted); font-style: italic; }
 /* Subharmonic recovery chip — amber, full-width, actionable. Disabled = non-actionable fallback. */
 .tile-subchip {
   font-size: 12px; color: #ffb454; background: rgba(40, 20, 0, 0.8);

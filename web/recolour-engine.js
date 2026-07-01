@@ -1020,7 +1020,7 @@
     var region = opt.region ? clampRegion(opt.region, imageData.width, imageData.height) : null
     var avail = region ? Math.min(region.width, region.height) : Math.min(imageData.width, imageData.height)
     var N = po2Floor(Math.min(avail, TILING.N_CAP))
-    var empty = { tiling: false, period: 0, combCount: 0, topRatio: 0, confidence: 0, rbig: 0, tileBasis: [] }
+    var empty = { tiling: false, period: 0, combCount: 0, topRatio: 0, confidence: 0, rbig: 0, tileBasis: [], combMin: TILING.COMB_MIN }
     if (N < TILING.N_FLOOR) return empty // too small to host a >=4-harmonic comb
 
     var lagMax = Math.min(TILING.LAG_MAX_CAP, N / 2 - 2)
@@ -1066,6 +1066,7 @@
     // Zeroed when not tiling (mirrors detectWatermark's [0,1] convention).
     best.confidence = best.tiling
       ? Math.max(0, Math.min((best.combCount - TILING.COMB_MIN + 1) / (10 - TILING.COMB_MIN + 1), 1)) : 0
+    best.combMin = TILING.COMB_MIN // single source of truth for the gate (app.js reads t.combMin, no magic 5)
 
     // #46: build the image-pixel lattice basis from the winning radius's fundamental + 2nd vector, sign-
     // normalised into a canonical half-plane (x > 0, or x == 0 && y > 0) so a symmetric lattice always
@@ -1084,6 +1085,267 @@
   function canonicalBasis (lx, ly) {
     if (lx > 0 || (lx === 0 && ly > 0)) return { x: lx, y: ly }
     return { x: -lx, y: -ly }
+  }
+
+  // =============================================================================================
+  // detectTextTiling (#53, T29 follow-up) — template-matching (fast NCC) detector for LETTER-FORM
+  // tiled watermarks (e.g. "TAYLOR GALE") that the FFT comb (detectTiling) misses: letter shapes
+  // scatter energy across competing AC peaks with no dominant stripe axis, so combCount stays below
+  // the gate. Here the user's boxed instance IS the template; normalised cross-correlation against
+  // the whole frame finds its repeated echoes, and a nearest-neighbour pitch analysis yields a
+  // lattice basis compatible with propagateMask().
+  //
+  // Ported from the validated spike scripts/spike-text-tiling.js (GO, 2026-06-30): NCC cutoff 0.5,
+  // anisotropic NMS (CORE-20), template-footprint normalisation window, EPS NaN guard, >=3-peak /
+  // >=0.5-score lattice gate. Wired as the runTile() fallback when detectTiling().combCount <
+  // combMin — an ADDITIONAL mode, NOT a replacement for the stripe-comb path (#53).
+  // =============================================================================================
+  var TEXT_TILING = {
+    WORK_MAX: 1024,       // downscale longest side to <= this before the 2-D FFT (cheap, ample for glyphs)
+    NCC_CUTOFF: 0.5,      // spike-validated: targets latch a >=3 lattice, all negatives stay below
+    EPS: 1e-10,           // denominator floor — flat template/region -> 0, never NaN (the NCC killer)
+    MIN_PEAKS: 3,         // lattice gate: >= this many instances...
+    MIN_SCORE: 0.5,       // ...AND >= this fraction of peaks sharing the dominant pitch
+    PITCH_TOL_MAG: 0.18,  // a NN offset joins the dominant pitch if its magnitude is within this...
+    PITCH_TOL_DEG: 18,    // ...fraction AND its direction within this many degrees of the median NN
+    V1_MIN_DEG: 20,       // a 2nd basis vector must be > this many deg off v0 (genuinely non-collinear)...
+    V1_MIN_SUPPORT: 2,    // ...AND shared by >= this many peaks, else omit v1 -> 1-D basis (#53 plan)
+    MIN_TEMPLATE: 4       // template < this px on either axis -> too small for NCC, return empty
+  }
+
+  // Smallest power of two >= v (the spike's pad-up; po2Floor above is for the comb's window cap).
+  function po2Ceil (v) { var p = 1; while (p < v) p *= 2; return p }
+
+  // Full-image Rec.601 luminance at native resolution. Distinct from lumaWindow (a centred NxN crop):
+  // NCC needs the whole frame. Only used on the scale==1 path; large frames take the downscale path.
+  function fullLuma (imageData) {
+    var data = imageData.data, n = imageData.width * imageData.height, luma = new Float64Array(n)
+    for (var i = 0; i < n; i++) { var o = i * 4; luma[i] = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2] }
+    return luma
+  }
+
+  // Area-average RGBA -> luma straight into a (dw x dh) working plane. Folds the downscale into the
+  // luma extraction so a huge frame never materialises a full-res Float64 luma intermediate. Area
+  // (not nearest) averaging keeps faint watermark strokes alive through the shrink.
+  function downscaleToLuma (imageData, dw, dh) {
+    var data = imageData.data, W = imageData.width, H = imageData.height, out = new Float64Array(dw * dh)
+    for (var y = 0; y < dh; y++) {
+      var sy0 = Math.floor(y * H / dh), sy1 = Math.max(sy0 + 1, Math.floor((y + 1) * H / dh))
+      for (var x = 0; x < dw; x++) {
+        var sx0 = Math.floor(x * W / dw), sx1 = Math.max(sx0 + 1, Math.floor((x + 1) * W / dw))
+        var sum = 0, cnt = 0
+        for (var sy = sy0; sy < sy1 && sy < H; sy++) {
+          var row = sy * W
+          for (var sx = sx0; sx < sx1 && sx < W; sx++) {
+            var o = (row + sx) * 4
+            sum += 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2]; cnt++
+          }
+        }
+        out[y * dw + x] = cnt ? sum / cnt : 0
+      }
+    }
+    return out
+  }
+
+  // Summed-area tables (luma and luma^2) for the local image-energy denominator. Ported from spike.
+  // sat[(y+1)*(W+1)+(x+1)] = sum of luma over [0..x] x [0..y].
+  function buildSAT (luma, W, H) {
+    var sat = new Float64Array((W + 1) * (H + 1)), sat2 = new Float64Array((W + 1) * (H + 1))
+    for (var y = 0; y < H; y++) {
+      var rowSum = 0, rowSum2 = 0
+      for (var x = 0; x < W; x++) {
+        var v = luma[y * W + x]
+        rowSum += v; rowSum2 += v * v
+        var idx = (y + 1) * (W + 1) + (x + 1)
+        sat[idx] = sat[y * (W + 1) + (x + 1)] + rowSum
+        sat2[idx] = sat2[y * (W + 1) + (x + 1)] + rowSum2
+      }
+    }
+    return { sat: sat, sat2: sat2 }
+  }
+  function winSum (sat, W, u, v, tw, th) {
+    var s = W + 1
+    return sat[(v + th) * s + (u + tw)] - sat[v * s + (u + tw)] - sat[(v + th) * s + u] + sat[v * s + u]
+  }
+
+  // Fast normalised cross-correlation (Lewis 1995). Returns { ncc, tw, th, validW, validH, W }.
+  // CIRCULAR-WRAP GUARD (#53 plan): pad to N = po2Ceil(max(W,H)) and define NCC ONLY over the
+  // full-overlap valid region u in [0,W-tw], v in [0,H-th]. Every accessed offset u+x <= W-1 < N, so
+  // no offset wraps and no partial-overlap window ever reaches the denominator. Do NOT shrink N below
+  // max(W,H), and do NOT read NCC past the valid region — either reintroduces border false peaks.
+  function fastNCC (luma, W, H, bbox) {
+    var tw = bbox.x1 - bbox.x0, th = bbox.y1 - bbox.y0
+    var N = po2Ceil(Math.max(W, H))
+    var lineRe = new Float64Array(N), lineIm = new Float64Array(N), ty, tx, k
+
+    // Zero-mean template + its energy.
+    var meanT = 0
+    for (ty = 0; ty < th; ty++) for (tx = 0; tx < tw; tx++) meanT += luma[(bbox.y0 + ty) * W + (bbox.x0 + tx)]
+    meanT /= (tw * th)
+    var tPad = new Float64Array(N * N), tIm = new Float64Array(N * N), energyT = 0
+    for (ty = 0; ty < th; ty++) for (tx = 0; tx < tw; tx++) {
+      var tv = luma[(bbox.y0 + ty) * W + (bbox.x0 + tx)] - meanT
+      tPad[ty * N + tx] = tv; energyT += tv * tv
+    }
+
+    // Image plane (zero-padded into the NxN top-left).
+    var iPad = new Float64Array(N * N), iIm = new Float64Array(N * N)
+    for (var y = 0; y < H; y++) for (var x = 0; x < W; x++) iPad[y * N + x] = luma[y * W + x]
+
+    // Numerator = IFFT( FFT(I) . conj(FFT(T')) ).  c(u,v) = sum I(u+x,v+y) T'(x,y).
+    fft2(iPad, iIm, false, N, lineRe, lineIm)
+    fft2(tPad, tIm, false, N, lineRe, lineIm)
+    var cRe = new Float64Array(N * N), cIm = new Float64Array(N * N)
+    for (k = 0; k < N * N; k++) {
+      var a = iPad[k], b = iIm[k], c = tPad[k], dd = tIm[k] // I * conj(T): (a+bi)(c-di)
+      cRe[k] = a * c + b * dd
+      cIm[k] = b * c - a * dd
+    }
+    fft2(cRe, cIm, true, N, lineRe, lineIm) // cRe[v*N+u] = numerator(u,v)
+
+    // Denominator via SAT; assemble NCC over the valid region.
+    var S = buildSAT(luma, W, H)
+    var ncc = new Float64Array(W * H)
+    var n = tw * th, validW = W - tw, validH = H - th, sqrtET = Math.sqrt(energyT)
+    for (var v = 0; v <= validH; v++) {
+      for (var u = 0; u <= validW; u++) {
+        var sum = winSum(S.sat, W, u, v, tw, th)
+        var sum2 = winSum(S.sat2, W, u, v, tw, th)
+        var energyI = sum2 - (sum * sum) / n // sum of squared deviations in the window
+        if (energyI < 0) energyI = 0
+        var denom = Math.sqrt(energyI) * sqrtET
+        if (denom < TEXT_TILING.EPS) denom = TEXT_TILING.EPS // flat region/template guard (no NaN)
+        var val = cRe[v * N + u] / denom
+        if (val > 1) val = 1; else if (val < -1) val = -1
+        ncc[v * W + u] = val
+      }
+    }
+    return { ncc: ncc, tw: tw, th: th, validW: validW, validH: validH, W: W }
+  }
+
+  // Peaks = 3x3 local maxima above NCC_CUTOFF, then ANISOTROPIC NMS (dx<tw AND dy<th, per-axis) so
+  // the SHORT axis of a wide-short text template is not over-suppressed (CORE-20 — isotropic max(tw,th)
+  // collapsed TAYLOR GALE's 5 rows to 2). Peaks stored at the template CENTRE. The 1px border skip
+  // keeps the 3x3 test in-bounds and is the partial-overlap exclusion the wrap guard relies on.
+  function extractTextPeaks (res, cutoff) {
+    var W = res.W, ncc = res.ncc, tw = res.tw, th = res.th, cand = []
+    for (var v = 1; v < res.validH; v++) {
+      for (var u = 1; u < res.validW; u++) {
+        var val = ncc[v * W + u]
+        if (val < cutoff) continue
+        if (val < ncc[v * W + u - 1] || val < ncc[v * W + u + 1] ||
+            val < ncc[(v - 1) * W + u] || val < ncc[(v + 1) * W + u] ||
+            val < ncc[(v - 1) * W + u - 1] || val < ncc[(v - 1) * W + u + 1] ||
+            val < ncc[(v + 1) * W + u - 1] || val < ncc[(v + 1) * W + u + 1]) continue
+        cand.push({ x: u + (tw >> 1), y: v + (th >> 1), v: val }) // peak at template centre
+      }
+    }
+    cand.sort(function (a, b) { return b.v - a.v })
+    var kept = []
+    for (var i = 0; i < cand.length; i++) {
+      var ok = true
+      for (var j = 0; j < kept.length; j++) {
+        if (Math.abs(cand[i].x - kept[j].x) < tw && Math.abs(cand[i].y - kept[j].y) < th) { ok = false; break }
+      }
+      if (ok) kept.push(cand[i])
+    }
+    return kept
+  }
+
+  // Nearest-neighbour pitch analysis. pitch = median NN vector (dominant lattice spacing); score =
+  // fraction of NN vectors within tolerance of it. NN offsets canonicalised to the +x half-plane so a
+  // symmetric lattice gives one consistent direction. Ported from spike.
+  function textLattice (peaks) {
+    if (peaks.length < 2) return { score: 0, pitch: null, nn: [] }
+    var nn = []
+    for (var i = 0; i < peaks.length; i++) {
+      var best = Infinity, bx = 0, by = 0
+      for (var j = 0; j < peaks.length; j++) {
+        if (i === j) continue
+        var dx = peaks[j].x - peaks[i].x, dy = peaks[j].y - peaks[i].y, d = dx * dx + dy * dy
+        if (d < best) { best = d; bx = dx; by = dy }
+      }
+      if (bx < 0 || (bx === 0 && by < 0)) { bx = -bx; by = -by } // canonical +x half-plane
+      nn.push({ x: bx, y: by, mag: Math.hypot(bx, by) })
+    }
+    var byMag = nn.slice().sort(function (a, b) { return a.mag - b.mag })
+    var med = byMag[byMag.length >> 1]
+    var medAng = Math.atan2(med.y, med.x), within = 0
+    for (var p = 0; p < nn.length; p++) {
+      var dm = Math.abs(nn[p].mag - med.mag) / (med.mag || 1)
+      var da = Math.abs(Math.atan2(nn[p].y, nn[p].x) - medAng) * 180 / Math.PI
+      if (da > 180) da = 360 - da
+      if (dm <= TEXT_TILING.PITCH_TOL_MAG && da <= TEXT_TILING.PITCH_TOL_DEG) within++
+    }
+    return { score: within / nn.length, pitch: { x: med.x, y: med.y, mag: med.mag }, nn: nn }
+  }
+
+  /**
+   * detectTextTiling — find a tiled LETTER-FORM watermark by template-matching the user's boxed
+   * instance against the whole image (fast NCC), then reading the repeat pitch as a lattice basis.
+   *
+   * Pure (TEST-2): reads imageData.data + region only; allocates its own buffers; touches no DOM.
+   *
+   * @param {ImageData|{data,width,height}} imageData  RGBA frame.
+   * @param {{x:number,y:number,width:number,height:number}} region  the user's boxed ONE instance, in
+   *        FULL-image coords. Reuses clampRegion() — identical region contract to detectTiling().
+   * @returns {{tiling:boolean, instances:number, tileBasis:Array<{x:number,y:number}>, confidence:number}}
+   *        tileBasis is in FULL-image pixels (rescaled from the working downscale), ready for
+   *        propagateMask(): 1 vector -> single-line text, 2 -> grid. confidence is the lattice score,
+   *        in (0,1] iff tiling (>= MIN_SCORE by construction), 0 otherwise (mirrors detectTiling).
+   */
+  function detectTextTiling (imageData, region) {
+    var W = imageData.width, H = imageData.height
+    var bb = clampRegion(region, W, H) // {x0,y0,x1,y1} in full coords — same conversion as detectTiling
+    if (bb.x1 - bb.x0 < TEXT_TILING.MIN_TEMPLATE || bb.y1 - bb.y0 < TEXT_TILING.MIN_TEMPLATE) {
+      return { tiling: false, instances: 0, tileBasis: [], confidence: 0 }
+    }
+
+    // Working resolution: longest side <= WORK_MAX so the 2-D FFT stays cheap (ample for glyph matching).
+    var scale = Math.min(1, TEXT_TILING.WORK_MAX / Math.max(W, H))
+    var dw = Math.max(1, Math.round(W * scale)), dh = Math.max(1, Math.round(H * scale))
+    var work = scale < 1 ? downscaleToLuma(imageData, dw, dh) : fullLuma(imageData)
+
+    // Template bbox in working coords; re-guard against a sub-template crop after the shrink.
+    var tbox = {
+      x0: Math.max(0, Math.round(bb.x0 * scale)), y0: Math.max(0, Math.round(bb.y0 * scale)),
+      x1: Math.min(dw, Math.round(bb.x1 * scale)), y1: Math.min(dh, Math.round(bb.y1 * scale))
+    }
+    if (tbox.x1 - tbox.x0 < TEXT_TILING.MIN_TEMPLATE || tbox.y1 - tbox.y0 < TEXT_TILING.MIN_TEMPLATE) {
+      return { tiling: false, instances: 0, tileBasis: [], confidence: 0 }
+    }
+
+    var res = fastNCC(work, dw, dh, tbox)
+    var peaks = extractTextPeaks(res, TEXT_TILING.NCC_CUTOFF)
+    var lat = textLattice(peaks)
+    var tiling = peaks.length >= TEXT_TILING.MIN_PEAKS && lat.score >= TEXT_TILING.MIN_SCORE
+    if (!tiling) return { tiling: false, instances: peaks.length, tileBasis: [], confidence: 0 }
+
+    // Basis: v0 = dominant pitch. v1 = the strongest NN offset that is > V1_MIN_DEG off v0 (genuinely
+    // non-collinear — also reject near-180 anti-parallel) AND shared by >= V1_MIN_SUPPORT peaks; else
+    // omit v1 -> 1-D basis (still satisfies the DoD; #53 plan). Rescale working vectors to full-image
+    // px (/scale) before canonicalising, so propagateMask stamps at the true pitch on >1024px frames.
+    var inv = scale < 1 ? 1 / scale : 1
+    var v0 = lat.pitch, v0ang = Math.atan2(v0.y, v0.x)
+    var groups = {}
+    for (var q = 0; q < lat.nn.length; q++) {
+      var nv = lat.nn[q]
+      if (nv.mag < TEXT_TILING.MIN_TEMPLATE) continue
+      var da = Math.abs(Math.atan2(nv.y, nv.x) - v0ang) * 180 / Math.PI
+      if (da > 180) da = 360 - da
+      if (da < TEXT_TILING.V1_MIN_DEG || da > 180 - TEXT_TILING.V1_MIN_DEG) continue // collinear / anti-parallel
+      var key = Math.round(nv.x / 4) + ',' + Math.round(nv.y / 4) // cluster near-equal offsets
+      if (!groups[key]) groups[key] = { x: nv.x, y: nv.y, n: 0 }
+      groups[key].n++
+    }
+    var v1 = null
+    for (var g in groups) {
+      if (groups[g].n >= TEXT_TILING.V1_MIN_SUPPORT && (!v1 || groups[g].n > v1.n)) v1 = groups[g]
+    }
+    var basis = [canonicalBasis(Math.round(v0.x * inv), Math.round(v0.y * inv))]
+    if (v1) basis.push(canonicalBasis(Math.round(v1.x * inv), Math.round(v1.y * inv)))
+
+    return { tiling: true, instances: peaks.length, tileBasis: basis, confidence: Math.min(lat.score, 1) }
   }
 
   // =============================================================================================
@@ -1213,6 +1475,7 @@
     fillMaskRegion: fillMaskRegion,
     detectWatermark: detectWatermark,
     detectTiling: detectTiling,
+    detectTextTiling: detectTextTiling,
     propagateMask: propagateMask
   }
 })

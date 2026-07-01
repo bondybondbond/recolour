@@ -1,0 +1,53 @@
+SPIKE #58 — position-invariant 2-D lattice fit for detectTextTiling
+fixture repeated-tile-template.jpg 900x600
+
+
+=== STAGE 0: engine detectTextTiling() over candidate seeds (real shipped code) ===
+image 900x600
+r1 mid TAYLOR          box=(330,32,150x46) tiling=true peaks=9 basisN=1 basis=(0,113) | stamped=6 (1r x 6c)
+r3 mid TAYLOR          box=(330,268,150x46) tiling=true peaks=9 basisN=1 basis=(0,113) | stamped=5 (1r x 5c)
+r5 mid TAYLOR          box=(330,490,150x46) tiling=true peaks=9 basisN=1 basis=(0,113) | stamped=5 (1r x 5c)
+r1 mid GALE            box=(500,32,110x46) tiling=true peaks=17 basisN=1 basis=(0,113) | stamped=6 (1r x 6c)
+r2 left GALE           box=(60,150,110x46) tiling=true peaks=14 basisN=1 basis=(0,113) | stamped=5 (1r x 5c)
+r1 TAYLOR GALE         box=(300,30,320x50) tiling=true peaks=4 basisN=1 basis=(0,113) | stamped=6 (1r x 6c)
+r1 LOR slice           box=(372,32,70x46) tiling=true peaks=28 basisN=2 basis=(101,0) (0,113) | stamped=60 (6r x 10c)
+r1 letter O            box=(388,32,34x46) tiling=true peaks=54 basisN=1 basis=(59,-1) | stamped=16 (1r x 16c)
+
+=== STAGE 1: GLOBAL lattice fit (the #58 fix) ===
+r1 mid TAYLOR          peaks=9 basisN=2 basis=(0,113) (415,0) explFrac=1.00 | stamped=18 (3r x 6c) | M1 9/18 hit 9 miss 0 unexpl | M3 int=1.00 ref=0.40px
+r3 mid TAYLOR          peaks=9 basisN=2 basis=(0,113) (415,0) explFrac=1.00 | stamped=15 (3r x 5c) | M1 9/18 hit 9 miss 0 unexpl | M3 int=1.00 ref=0.40px
+r5 mid TAYLOR          peaks=9 basisN=2 basis=(0,113) (415,0) explFrac=1.00 | stamped=15 (3r x 5c) | M1 9/18 hit 9 miss 0 unexpl | M3 int=1.00 ref=0.40px
+r1 mid GALE            peaks=17 basisN=2 basis=(0,113) (414,0) explFrac=1.00 | stamped=12 (2r x 6c) | M1 10/12 hit 2 miss 7 unexpl | M3 int=193.00 ref=103.48px
+r2 left GALE           peaks=14 basisN=2 basis=(0,113) (414,0) explFrac=1.00 | stamped=15 (3r x 5c) | M1 9/12 hit 3 miss 5 unexpl | M3 int=191.00 ref=151.62px
+r1 TAYLOR GALE         peaks=4 basisN=1 basis=(0,113) explFrac=1.00 | stamped=6 (1r x 6c) | M1 4/7 hit 3 miss 0 unexpl | M3 int=1.00px
+r1 LOR slice           peaks=28 basisN=0 basis=- [low-explained-frac 0.29] explFrac=0.29 | stamped=1 (1r x 1c)
+r1 letter O            peaks=54 basisN=0 basis=- [low-explained-frac 0.12] explFrac=0.12 | stamped=1 (1r x 1c)
+
+  M2 DETERMINISM — distinct fitted bases WITHIN each tile cohort (must be 1):
+    TAYLOR           3 seeds, 3 tiling, distinct bases=1  [3x](0,113 | 415,0)
+    GALE             2 seeds, 2 tiling, distinct bases=1  [2x](0,113 | 414,0)
+    PHRASE           1 seeds, 1 tiling, distinct bases=1  [1x](0,113)
+    FRAG             2 seeds, 0 tiling, distinct bases=1  [2x](reject)
+
+=== M4 NEGATIVE CONTROLS (a confident 2-D lattice here = false positive = NO-GO) ===
+kids1.jpg (photo)          peaks=1 tiling=false basisN=0 explFrac=-  ok
+watermark.jpg (single)     peaks=9 tiling=true basisN=1 explFrac=1.00  ok
+copyright-watermark.png    peaks=1 tiling=false basisN=0 explFrac=-  ok
+
+  M5 peak-cloud autocorrelation — top difference-vector offsets (support desc):
+    (0,113    ) |v|=113.0 support=10
+    (0,340    ) |v|=340.0 support=8
+    (415,0    ) |v|=415.0 support=8
+    (0,227    ) |v|=226.8 support=8
+    (415,113  ) |v|=430.1 support=6
+    (415,-113 ) |v|=430.2 support=6
+    (0,453    ) |v|=453.0 support=4
+    (415,340  ) |v|=536.5 support=4
+    wrote scripts\evidence\spike-lattice-58\m5-autocorr-taylor.png
+  wrote scripts\evidence\spike-lattice-58\lattice-taylor.png
+
+================= GO / NO-GO =================
+M2 per-cohort determinism (TAYLOR & GALE): PASS
+M4 negative controls false positives: none
+VERDICT: GO
+=============================================

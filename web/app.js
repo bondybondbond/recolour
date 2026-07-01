@@ -1111,6 +1111,12 @@
 
   function runTile () {
     if (!tileOn || !baseImageData || !region) return
+    // Whole-image-box guard (#58): if the box ≈ the whole frame, the template ≈ the frame, leaving no
+    // NCC search room — detection can only ever fail, and today it shows the confusing "Not detected by
+    // current threshold". Detect that case and show actionable guidance instead. The 0.85 threshold is
+    // an UN-DERIVED heuristic placeholder — do NOT treat it as validated; #56 (auto-anchor) removes the
+    // manual box and this guard with it.
+    var wholeImageBox = (region.width * region.height) / (canvas.width * canvas.height) >= 0.85
     // Seed shape = the detected watermark glyph(s) inside the user's box (edge-based, colour-agnostic).
     var seed = Engine.detectWatermark(baseImageData, DETECT_PROFILE, region).mask
     var t = Engine.detectTiling(baseImageData, { region: region })
@@ -1137,10 +1143,11 @@
       basis: basis,
       textMode: textMode,
       textConfidence: textConfidence,
+      wholeImageBox: wholeImageBox,
       tileDoubled: false
     }
     paintTileOverlay(prop.mask)
-    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence)
+    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence, wholeImageBox)
     restoreDetectHint() // clear the "detecting…" notice — the card now carries the status
   }
 
@@ -1186,7 +1193,7 @@
     return n + ' · ' + rows + ' rows × ' + cols + ' column' + (cols === 1 ? '' : 's')
   }
 
-  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence) {
+  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence, wholeImageBox) {
     tileCount.textContent = tileCountText(instances, rows, cols)
     if (textMode) {
       // Text/NCC fallback path (#53): no combCount — the band is driven by the lattice-match
@@ -1207,6 +1214,11 @@
     } else if (combCount === 5) {
       tileMode.style.display = 'none'
       tileBand.textContent = 'Weak tiling signal — some instances may be missed'
+      tileBand.classList.add('warn')
+    } else if (wholeImageBox) {
+      // #58 interim UX guard: box ≈ whole image → no NCC search room. Guide instead of "Not detected".
+      tileMode.style.display = 'none'
+      tileBand.textContent = 'Box a single instance, not the whole image'
       tileBand.classList.add('warn')
     } else {
       tileMode.style.display = 'none'

@@ -1066,6 +1066,34 @@ describe('recolour engine', function () {
       assert.strictEqual(rLor.tiling, false, `LOR slice fragment must be rejected, got basis ${JSON.stringify(rLor.tileBasis)}`)
       assert.strictEqual(rO.tiling, false, `letter-O fragment must be rejected, got basis ${JSON.stringify(rO.tileBasis)}`)
     })
+
+    // #57: the tile-fill CONFIRM COUNT (not the basis) must also be position-invariant. The default
+    // (bbox-overlap) gate makes it swing 18/15/10 for the same TAYLOR word (CORE-23) because
+    // detectWatermark's in-box bbox varies with position; frameCanonical counts from the lattice+frame
+    // instead. Faithful repro: real detectWatermark seed (NOT a filled box), exactly like runTile().
+    it('#57 real fixture: frameCanonical makes the tile-fill instance count position-invariant (CORE-23)', async function () {
+      const _Jimp = require('jimp'); const Jimp = _Jimp.default || _Jimp
+      const jimg = await Jimp.read('./test/files/repeated-tile-template.jpg')
+      const img = { data: jimg.bitmap.data, width: jimg.bitmap.width, height: jimg.bitmap.height }
+      const profile = { edgeThreshold: 150, preContrast: false } // GUI DETECT_PROFILE (app.js)
+      const seeds = [ // same TAYLOR word, three grid rows
+        { x: 330, y: 32, width: 150, height: 46 },
+        { x: 330, y: 268, width: 150, height: 46 },
+        { x: 330, y: 490, width: 150, height: 46 }
+      ]
+      const dflt = [], canon = []
+      for (const s of seeds) {
+        const seedMask = engine.detectWatermark(img, profile, s).mask
+        const basis = engine.detectTextTiling(img, s).tileBasis
+        dflt.push(engine.propagateMask(seedMask, img.width, img.height, basis).instances)
+        canon.push(engine.propagateMask(seedMask, img.width, img.height, basis, { frameCanonical: true }).instances)
+      }
+      // Default reproduces the CORE-23 harm: count depends on which instance was boxed.
+      assert.ok(Math.max(...dflt) - Math.min(...dflt) >= 1, `default should vary (CORE-23): ${JSON.stringify(dflt)}`)
+      // frameCanonical: identical across all positions, and no recall loss vs the default max.
+      assert.strictEqual(Math.max(...canon) - Math.min(...canon), 0, `frameCanonical must be invariant: ${JSON.stringify(canon)}`)
+      assert.ok(canon[0] >= Math.max(...dflt), `no recall loss: canonical ${canon[0]} >= default max ${Math.max(...dflt)}`)
+    })
   })
 
   // Anchor -> propagate (#47, T29 Phase 3 DoD). Two gaps remained after #52 shipped the FFT
@@ -1097,6 +1125,36 @@ describe('recolour engine', function () {
       const r = engine.propagateMask(seedBlock(W, H, 5, 25, 6, 6), W, H, [{ x: 25, y: 0 }])
       assert.strictEqual(r.rows, 1, '1-D basis -> a single row')
       assert.strictEqual(r.cols, r.instances, 'cols must equal instances for a single line')
+    })
+
+    // ---- #57: frameCanonical count invariance (opt-in) ----
+    it('#57 frameCanonical: same-glyph seeds of DIFFERENT widths give identical instances/rows/cols', function () {
+      const W = 200, H = 200, basis = [{ x: 0, y: 40 }, { x: 50, y: 0 }]
+      // Same lattice, boxed at 3 congruent nodes but with different detected WIDTHS (the CORE-23 driver:
+      // detectWatermark's in-box bbox collapses at some positions). The count must not move.
+      const seeds = [seedBlock(W, H, 10, 8, 30, 10), seedBlock(W, H, 10, 88, 30, 10), seedBlock(W, H, 10, 128, 8, 10)]
+      const r = seeds.map(s => engine.propagateMask(s, W, H, basis, { frameCanonical: true }))
+      const inst = r.map(x => x.instances), rows = r.map(x => x.rows), cols = r.map(x => x.cols)
+      assert.strictEqual(Math.max(...inst) - Math.min(...inst), 0, `instances invariant: ${JSON.stringify(inst)}`)
+      assert.strictEqual(Math.max(...rows) - Math.min(...rows), 0, `rows invariant: ${JSON.stringify(rows)}`)
+      assert.strictEqual(Math.max(...cols) - Math.min(...cols), 0, `cols invariant: ${JSON.stringify(cols)}`)
+      assert.ok(inst[0] <= rows[0] * cols[0], 'instances <= rows*cols still holds')
+    })
+
+    it('#57 frameCanonical is opt-in: default path (omitted / explicit false) is unchanged', function () {
+      const W = 200, H = 200, basis = [{ x: 0, y: 40 }, { x: 50, y: 0 }]
+      const seed = seedBlock(W, H, 10, 8, 30, 10)
+      const a = engine.propagateMask(seed, W, H, basis)
+      const b = engine.propagateMask(seed, W, H, basis, { frameCanonical: false })
+      assert.strictEqual(a.instances, b.instances, 'explicit false === default')
+      assert.strictEqual(a.rows, b.rows); assert.strictEqual(a.cols, b.cols)
+    })
+
+    it('#57 frameCanonical: 1-D basis still collapses rows to 1 (cols === instances)', function () {
+      const W = 200, H = 200
+      const r = engine.propagateMask(seedBlock(W, H, 10, 10, 6, 6), W, H, [{ x: 0, y: 30 }], { frameCanonical: true })
+      assert.strictEqual(r.rows, 1, '1-D basis -> rows=1 under frameCanonical')
+      assert.strictEqual(r.cols, r.instances, 'cols === instances for a single line')
     })
 
     it('counts only in-bounds lattice lines (edge-clipped seed)', function () {

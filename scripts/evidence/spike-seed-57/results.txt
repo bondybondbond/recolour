@@ -1,0 +1,61 @@
+SPIKE #57 — in-box seed-footprint position-invariance (STEP 1 baseline)
+fixture repeated-tile-template.jpg 900x600
+DETECT_PROFILE = {"edgeThreshold":150,"preContrast":false}  (GUI-identical)
+
+=== BASELINE (shipped engine, no fix) — same TAYLOR word at 3 positions ===
+
+TAYLOR row1      seedRect=(330,32,150x46) seedBbox=142x46@(330,32) seedCentroid=(407,56) seedPx=2377
+                 path=TEXT(conf=1.00) combCount=0/5 basis=(0,113) (415,0) latticePhase=(330,32) canonAnchor=(330.0,32.0)[2D]
+                 => instances=18 rows=3 cols=6
+
+TAYLOR row3      seedRect=(330,268,150x46) seedBbox=150x46@(330,268) seedCentroid=(400,287) seedPx=1799
+                 path=TEXT(conf=1.00) combCount=0/5 basis=(0,113) (415,0) latticePhase=(330,268) canonAnchor=(330.0,42.0)[2D]
+                 => instances=15 rows=3 cols=5
+
+TAYLOR row5      seedRect=(330,490,150x46) seedBbox=40x43@(330,490) seedCentroid=(352,510) seedPx=601
+                 path=TEXT(conf=1.00) combCount=0/5 basis=(0,113) (415,0) latticePhase=(330,490) canonAnchor=(330.0,38.0)[2D]
+                 => instances=10 rows=2 cols=5
+
+--- PRE-FLIGHT: lattice-basis position-invariance (the #58 property) ---
+  distinct bases across 3 positions = 1   [3x](0,113 | 415,0)
+  basis invariant: YES — propagate-side phase fix is the correct surface
+
+--- VARIANCE (baseline; goal after fix = spread 0 on all three of instances/rows/cols) ---
+  seedBbox W : [142,150,40]  spread=110px
+  seedBbox H : [46,46,43]  spread=3px
+  instances  : [18,15,10]  spread=8
+  rows       : [3,3,2]  spread=1
+  cols       : [6,5,5]  spread=1
+
+  CORE-23 reproduced: YES — count varies with box position (harm confirmed)
+  trueCount reference (Voronoi cell-in-frame, per seed): [18,18,18]  -> ceiling=18
+
+=== STEP 2: CANONICAL-phase + basis-footprint gate — PREDICTION (no engine change) ===
+  baselineMax=18  trueCeil=18  (target: invariant, in [baselineMax, trueCeil])
+
+  centroid-point (disproven) instances=[10,10,10] rows=[2,2,2] cols=[5,5,5]
+                             spread(i/r/c)=0/0/0  invariant=true noRecallLoss=false noOverStamp=true  => FAIL
+
+  canonical frac=0.25        instances=[12,12,12] rows=[2,2,2] cols=[6,6,6]
+                             spread(i/r/c)=0/0/0  invariant=true noRecallLoss=false noOverStamp=true  => FAIL
+  canonical frac=0.50        instances=[18,18,18] rows=[3,3,3] cols=[6,6,6]
+                             spread(i/r/c)=0/0/0  invariant=true noRecallLoss=true noOverStamp=true  => PASS
+  canonical frac=0.75        instances=[18,18,18] rows=[3,3,3] cols=[6,6,6]
+                             spread(i/r/c)=0/0/0  invariant=true noRecallLoss=true noOverStamp=true  => PASS
+  canonical frac=1.00        instances=[18,18,18] rows=[3,3,3] cols=[6,6,6]
+                             spread(i/r/c)=0/0/0  invariant=true noRecallLoss=true noOverStamp=true  => PASS
+
+  port-equivalence — seed-anchor (minx,miny) at frac=0.50 (what the engine will do):
+  seed-anchor frac=0.50      instances=[18,18,18] rows=[3,3,3] cols=[6,6,6]
+                             spread(i/r/c)=0/0/0  invariant=true noRecallLoss=true noOverStamp=true  => PASS
+
+  integration — REAL Engine.propagateMask(seed, W, H, basis, {frameCanonical:true}):
+  TAYLOR row1      instances=18 rows=3 cols=6
+  TAYLOR row3      instances=18 rows=3 cols=6
+  TAYLOR row5      instances=18 rows=3 cols=6
+  engine spread(i/r/c)=0/0/0  in[baselineMax,trueCeil]=true  => PASS (matches prediction)
+
+================= RUNG-1 GO / NO-GO =================
+GO — canonical gate at footprintFrac=0.50 is invariant (spread<=1), >= baselineMax(18), <= trueCeil(18).
+Port this footprint fraction to propagateMask under opts.frameCanonical.
+====================================================

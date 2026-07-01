@@ -1479,7 +1479,12 @@
   // =============================================================================================
   var PROPAGATE = {
     MAX_INSTANCES: 4096, // hard cap — a near-zero basis must not spin millions of stamps (DoS-shaped)
-    MIN_BASIS_MAG: 2     // basis vectors shorter than this are degenerate (treated as "no tiling")
+    MIN_BASIS_MAG: 2,    // basis vectors shorter than this are degenerate (treated as "no tiling")
+    // frameCanonical (#57): count a node if its anchor lies in the frame EXPANDED by this fraction of a
+    // half lattice cell per axis (0.5 == Voronoi cell overlaps frame). Makes the instance COUNT a
+    // function of (basis, frame) only — invariant to which instance the user boxed (CORE-23). Validated
+    // at 0.5 in scripts/spike-seed-invariance-57.js (18/18/18, ==trueCeil, no recall loss). Opt-in only.
+    CANON_FRAC: 0.5
   }
 
   /**
@@ -1494,6 +1499,10 @@
    * @param {Array<{x:number,y:number}>} basis  1 or 2 image-pixel lattice vectors, e.g.
    *        detectTiling().tileBasis. 1 vector -> stamp along a line; 2 -> stamp across the 2-D grid.
    * @param {object} [opts]  maxInstances: override the PROPAGATE.MAX_INSTANCES cap.
+   *        frameCanonical (#57, default false): gate each node on its anchor lying in the frame expanded
+   *        by half a lattice cell (basis-derived) instead of on the seed BBOX overlapping the frame. This
+   *        makes `instances`/`rows`/`cols` a function of (basis, frame) only — position-invariant to which
+   *        instance was boxed (CORE-23). Stamping is unchanged (real seed pixels at each counted node).
    * @returns {{mask:Uint8Array, instances:number, subharmonicWarning:boolean, rows:number, cols:number}}
    *   mask: the seed OR-stamped at every lattice node whose translated bbox overlaps the image,
    *         clamped to bounds.
@@ -1514,6 +1523,7 @@
   function propagateMask (seedMask, width, height, basis, opts) {
     opts = opts || {}
     var maxInstances = opts.maxInstances != null ? opts.maxInstances : PROPAGATE.MAX_INSTANCES
+    var frameCanonical = !!opts.frameCanonical // #57 count invariance — opt-in, see PROPAGATE.CANON_FRAC
     var out = new Uint8Array(seedMask.length)
 
     // Collect the seed's set-pixel coords + bbox once.
@@ -1557,8 +1567,15 @@
     // ranges are bounded by image diagonal / basis magnitude; the MAX_INSTANCES cap is the hard stop.
     var v0 = vecs[0], v1 = vecs[1] || null
     var diag = width + height
-    var iMax = Math.ceil(diag / v0.mag) + 1
-    var jMax = v1 ? Math.ceil(diag / v1.mag) + 1 : 0
+    // frameCanonical needs a touch more reach: the expanded frame can admit one extra node past the
+    // image edge, so widen the sweep bound by 1 (default path keeps its exact +1 -> counts unchanged).
+    var iMax = Math.ceil(diag / v0.mag) + (frameCanonical ? 2 : 1)
+    var jMax = v1 ? Math.ceil(diag / v1.mag) + (frameCanonical ? 2 : 1) : 0
+    // Half a lattice cell per axis (frameCanonical gate). Zero on the default path (unused there).
+    // TODO: make frameCanonical the default after #62 validates the seed-side (detectWatermark) path;
+    // then this branch becomes the single node-gate and the bbox-overlap path can be retired.
+    var hx = frameCanonical ? PROPAGATE.CANON_FRAC * 0.5 * (Math.abs(v0.x) + (v1 ? Math.abs(v1.x) : 0)) : 0
+    var hy = frameCanonical ? PROPAGATE.CANON_FRAC * 0.5 * (Math.abs(v0.y) + (v1 ? Math.abs(v1.y) : 0)) : 0
     var instances = 0
     // Count DISTINCT lattice lines that produced an in-bounds stamp: cols = distinct i (along v0),
     // rows = distinct j (along v1). Cheap fixed-size seen-flags keyed by (index + max) — for a 1-D
@@ -1570,8 +1587,14 @@
       for (var j = -jMax; j <= jMax; j++) {
         var ox = Math.round(i * v0.x + (v1 ? j * v1.x : 0))
         var oy = Math.round(i * v0.y + (v1 ? j * v1.y : 0))
-        // Only stamp nodes whose translated bbox actually overlaps the image.
-        if (maxx + ox < 0 || minx + ox >= width || maxy + oy < 0 || miny + oy >= height) continue
+        if (frameCanonical) {
+          // #57: gate on the node ANCHOR (seed bbox origin + offset) lying in the frame expanded by
+          // half a cell — basis-derived, so the count is invariant to the seed footprint's size/phase.
+          if (minx + ox < -hx || minx + ox >= width + hx || miny + oy < -hy || miny + oy >= height + hy) continue
+        } else {
+          // Default: stamp nodes whose translated seed BBOX overlaps the image (footprint-dependent).
+          if (maxx + ox < 0 || minx + ox >= width || maxy + oy < 0 || miny + oy >= height) continue
+        }
         instances++
         if (!iSeen[i + iMax]) { iSeen[i + iMax] = 1; cols++ }
         if (!jSeen[j + jMax]) { jSeen[j + jMax] = 1; rows++ }

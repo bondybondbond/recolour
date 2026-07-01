@@ -1131,7 +1131,10 @@
       var tt = Engine.detectTextTiling(baseImageData, region)
       if (tt.tiling) { basis = tt.tileBasis; textMode = true; textConfidence = tt.confidence }
     }
-    var prop = Engine.propagateMask(seed, canvas.width, canvas.height, basis)
+    // frameCanonical (#57): count instances from the lattice + frame, not the seed's own bbox, so the
+    // confirm-card count is identical no matter which instance the user boxed (CORE-23). Removal mask is
+    // unchanged — real seed pixels are still stamped at every counted node.
+    var prop = Engine.propagateMask(seed, canvas.width, canvas.height, basis, { frameCanonical: true })
     tileResult = {
       seed: seed,
       propMask: prop.mask,

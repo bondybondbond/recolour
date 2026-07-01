@@ -1,0 +1,62 @@
+SPIKE #60 — phrase-level seed expansion (mod-lattice fold) for detectTextTiling
+fixture repeated-tile-template.jpg 900x600
+
+whole-image content mask: 30585 px, 107 clusters
+
+=== STAGE 0 (shipped) + STAGE 1 (expand): per-seed ===
+r1 mid TAYLOR    tiling=true basis=(0,113) (415,0) | STAGE0 stamped=18 (3r x 6c) | 1b foldPx=10126 clusters=51 sep=398px stamped=18 (3r x 6c) | 1a stamped=18 clusters=31
+r1 mid GALE      tiling=true basis=(0,113) (414,0) | STAGE0 stamped=18 (3r x 6c) | 1b foldPx=10197 clusters=51 sep=397px stamped=18 (3r x 6c) | 1a stamped=18 clusters=30
+r1 LOR frag      tiling=false basis=- | STAGE0 stamped=1 (1r x 1c) | EXPANSION GUARDED (no valid lattice) — correct for FRAG
+r1 letter O      tiling=false basis=- | STAGE0 stamped=1 (1r x 1c) | EXPANSION GUARDED (no valid lattice) — correct for FRAG
+
+=== M1 — one box removes the WHOLE phrase, identically from either box ===
+  STAGE0 today: TAYLOR-grid vs GALE-grid overlap IoU = 0.000  (0 = disjoint word sets = the bug)
+  content removed — STAGE0 (shipped): TAYLOR-box=29.5% , GALE-box=21.2%   (partial: only its own word)
+  content removed — 1b (expanded):    TAYLOR-box=100.0% , GALE-box=100.0%   (target ~100% = whole phrase)
+  folded unit spans 398px of the 415px cell (both words)
+  invariance: folded-unit IoU (TAYLOR vs GALE box) = 0.906 ; structure TAYLOR 18(3x6) vs GALE 18(3x6) -> MATCH
+  (caveat) TAYLOR-vs-GALE final-mask pixel IoU = 0.833 — sub-stroke fringe from the 1px/seed basis delta; fill dilation (#54) absorbs it
+
+=== M4a — basis reconciliation across seeds ===
+  TAYLOR basis (0,113) (415,0) vs GALE basis (0,113) (414,0) | max component delta=1px -> RECONCILE
+
+=== M4b — per-row phase drift (column-profile cross-correlation, row 0 as reference) ===
+  row j=0   best horiz shift vs row0 = 0   px
+  row j=1   best horiz shift vs row0 = 0   px
+  row j=2   best horiz shift vs row0 = 0   px
+  row j=3   best horiz shift vs row0 = 0   px
+  row j=4   best horiz shift vs row0 = 0   px
+  drift per lattice row = 0.000 px/row  (NO-GO if > 1.0)
+
+=== STAGE 3 — fragment safety ===
+  r1 LOR frag      guarded=true tiling=false  (expansion correctly skipped)
+  r1 letter O      guarded=true tiling=false  (expansion correctly skipped)
+  wrote scripts\evidence\spike-phrase-60\stage1b-taylor-expanded.png
+  wrote scripts\evidence\spike-phrase-60\stage0-taylor-partial.png
+  wrote scripts\evidence\spike-phrase-60\stage1b-gale-expanded.png
+  wrote scripts\evidence\spike-phrase-60\fold-unit-taylor.png
+
+=== STAGE 2 / M3 — single-instance regression (phantom-sibling gate) ===
+  logo.png               tiling=false -> expansion guarded off (no phantom sibling) OK [GATE]
+  copyright-watermark.png tiling=false -> expansion guarded off (no phantom sibling) OK [GATE]
+  watermark.jpg          tiling=true basis=(0,97) | folded clusters=4 sep=444px [obs — pre-existing false 1-D tile, see #58 M4]
+
+================= GO / NO-GO =================
+M1 mechanism + invariance (fold captures sibling, identical from either box): PASS
+M3 no phantom sibling (single-word/logo guarded off):                        PASS
+M4a bases reconcile across seeds:                                            PASS
+M4b per-row phase drift <= 1px/row:                                          PASS
+VERDICT: GO
+
+BUILD NOTES:
+ - The mod-lattice FOLD must use FLOOR (true modulo into the fundamental cell), NOT round —
+   round clips the negative-residual half and silently drops ~half the content (incl. a word).
+ - Fold anchor MUST be lattice-canonical (seed-independent), NOT the boxed position — that is
+   what makes the result identical whichever word the user boxes.
+ - #62 interaction is a MITIGATION, not a blocker: folding the WHOLE-image content averages
+   detectWatermark per-instance bbox variance (CORE-23,25) across all instances, so the unit is
+   more robust than any single seed. On HARDER fixtures (faint/missed instances) removal
+   completeness is still bounded by what detectWatermark finds SOMEWHERE — a robustness caveat.
+ - Residual 1px/seed basis delta (415 vs 414) leaves a sub-stroke fringe on far instances;
+   fill dilation (#54) absorbs it. Optional polish: snap both boxes to one canonical integer basis.
+=============================================

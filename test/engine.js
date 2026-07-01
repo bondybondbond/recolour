@@ -982,6 +982,90 @@ describe('recolour engine', function () {
       assert.strictEqual(r.tiling, false)
       assert.deepStrictEqual(r.tileBasis, [])
     })
+
+    // #58 — global lattice fit: position-invariant 2-D basis (the 6-vs-76 fix) + fragment-seed
+    // rejection. A 2-D grid mirrors the TAYLOR GALE fixture shape: multiple rows AND columns so the
+    // old seed-local NN v1 heuristic had somewhere to diverge.
+    function boxMask (W, H, s) {
+      const m = new Uint8Array(W * H)
+      const x1 = Math.min(W, s.x + s.width), y1 = Math.min(H, s.y + s.height)
+      for (let y = s.y; y < y1; y++) for (let x = s.x; x < x1; x++) m[y * W + x] = 1
+      return m
+    }
+    // NOTE: the canvas is sized to just barely exceed the drawn grid (tight margins on the last
+    // row/col). propagateMask deliberately extrapolates lattice nodes across the WHOLE frame
+    // (by design — it stamps predicted/occluded instances too, LEARNINGS/#46), so a canvas much
+    // larger than the drawn grid would legitimately produce MORE stamps than "true tiles" without
+    // that being a bug. Tight margins keep the true grid count a meaningful upper bound.
+    function gridImg () {
+      const gw = 30, gh = 14, pitchX = 60, pitchY = 50
+      const cols = 4, rows = 5
+      const W = 10 + (cols - 1) * pitchX + gw + 5
+      const H = 10 + (rows - 1) * pitchY + gh + 5
+      const img = bgImg(W, H)
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) stampGlyph(img, 10 + c * pitchX, 10 + r * pitchY, gw, gh, FG)
+      }
+      return { img, gw, gh, pitchX, pitchY, cols, rows }
+    }
+    function sortBasis (basis) {
+      return basis.map(v => v.x + ',' + v.y).sort().join(' | ')
+    }
+
+    it('#58 position invariance: boxing different valid instances on the same grid yields the SAME basis', function () {
+      const g = gridImg()
+      const seedA = { x: 10 + 1 * g.pitchX, y: 10 + 1 * g.pitchY, width: g.gw, height: g.gh } // (col1,row1)
+      const seedB = { x: 10 + 2 * g.pitchX, y: 10 + 3 * g.pitchY, width: g.gw, height: g.gh } // (col2,row3)
+      const rA = engine.detectTextTiling(g.img, seedA)
+      const rB = engine.detectTextTiling(g.img, seedB)
+      assert.strictEqual(rA.tiling, true, 'seed A should tile')
+      assert.strictEqual(rB.tiling, true, 'seed B should tile')
+      assert.strictEqual(sortBasis(rA.tileBasis), sortBasis(rB.tileBasis),
+        `basis must be position-invariant: A=${JSON.stringify(rA.tileBasis)} B=${JSON.stringify(rB.tileBasis)}`)
+      assert.strictEqual(rA.instances, rB.instances, 'peak count should also match across seed positions')
+    })
+
+    it('#58 no subharmonic over-stamp: propagateMask instance count does not exceed the true grid size', function () {
+      const g = gridImg()
+      const seed = { x: 10 + 1 * g.pitchX, y: 10 + 1 * g.pitchY, width: g.gw, height: g.gh }
+      const r = engine.detectTextTiling(g.img, seed)
+      assert.strictEqual(r.tiling, true)
+      const mask = boxMask(g.img.width, g.img.height, seed)
+      const prop = engine.propagateMask(mask, g.img.width, g.img.height, r.tileBasis)
+      const trueCount = g.cols * g.rows
+      assert.ok(prop.instances <= trueCount,
+        `stamped ${prop.instances} instances but the grid only has ${trueCount} — subharmonic over-stamp`)
+      assert.strictEqual(prop.subharmonicWarning, false, 'a correctly-fit basis should not flag subharmonic')
+    })
+
+    // ---- real-fixture: the exact 6-vs-76 bug + fragment over-stamp from the #58 spike -----------
+    // repeated-tile-template.jpg is the TAYLOR GALE fixture the spike validated against (GO,
+    // scripts/evidence/spike-lattice-58/results.txt). Seed coords are the spike's own probe seeds.
+    it('#58 real fixture: boxing TAYLOR at two different rows yields the SAME basis (the 6-vs-76 fix)', async function () {
+      const _Jimp = require('jimp'); const Jimp = _Jimp.default || _Jimp // CORE-1: ESM/CJS interop
+      const jimg = await Jimp.read('./test/files/repeated-tile-template.jpg')
+      const img = { data: jimg.bitmap.data, width: jimg.bitmap.width, height: jimg.bitmap.height }
+      const seedR1 = { x: 330, y: 32, width: 150, height: 46 } // spike: 'r1 mid TAYLOR'
+      const seedR3 = { x: 330, y: 268, width: 150, height: 46 } // spike: 'r3 mid TAYLOR'
+      const rA = engine.detectTextTiling(img, seedR1)
+      const rB = engine.detectTextTiling(img, seedR3)
+      assert.strictEqual(rA.tiling, true, 'TAYLOR row 1 should tile')
+      assert.strictEqual(rB.tiling, true, 'TAYLOR row 3 should tile')
+      assert.strictEqual(sortBasis(rA.tileBasis), sortBasis(rB.tileBasis),
+        `basis must be position-invariant on the real fixture: A=${JSON.stringify(rA.tileBasis)} B=${JSON.stringify(rB.tileBasis)}`)
+    })
+
+    it('#58 real fixture: fragment seeds (LOR slice / letter O) no longer over-stamp — rejected as non-tiling', async function () {
+      const _Jimp = require('jimp'); const Jimp = _Jimp.default || _Jimp
+      const jimg = await Jimp.read('./test/files/repeated-tile-template.jpg')
+      const img = { data: jimg.bitmap.data, width: jimg.bitmap.width, height: jimg.bitmap.height }
+      const lorSlice = { x: 372, y: 32, width: 70, height: 46 } // spike: over-stamped to 60 on the old engine
+      const letterO = { x: 388, y: 32, width: 34, height: 46 } // spike: over-stamped to 30 on the old engine
+      const rLor = engine.detectTextTiling(img, lorSlice)
+      const rO = engine.detectTextTiling(img, letterO)
+      assert.strictEqual(rLor.tiling, false, `LOR slice fragment must be rejected, got basis ${JSON.stringify(rLor.tileBasis)}`)
+      assert.strictEqual(rO.tiling, false, `letter-O fragment must be rejected, got basis ${JSON.stringify(rO.tileBasis)}`)
+    })
   })
 
   // Anchor -> propagate (#47, T29 Phase 3 DoD). Two gaps remained after #52 shipped the FFT

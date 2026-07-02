@@ -1,0 +1,33 @@
+#60 BUILD SESSION — QA-discovered bug + fix (2026-07-02)
+
+Durable evidence for a real defect found via live Chrome QA during the #60 build (phrase-level
+tile expansion), not caught by the prior spike (scripts/evidence/spike-phrase-60/, which validated
+mask-coverage metrics only — recall/IoU — and never exercised the real fillMaskRegion/BFS pipeline).
+
+THE BUG (first implementation attempt: whole-image detectWatermark + foldMaskToCell):
+  broken-wholeimage-fold-mask.png — the folded seed shows THREE real text rows smeared together
+  (a few px of mutual jitter) plus a long diagonal artifact (the fixture's mountain-silhouette edge,
+  an unrelated Sobel edge, picked up by whole-image detection and folded in as noise). This corrupted
+  fillMaskRegion's BFS reconstruction into visible pale-blob artifacts on every instance.
+
+THE FIX (shipped): detect ONCE within the boxed instance's OWN lattice cell (new `latticeCellOrigin`
+export), then fold/translate that single clean detection to the canonical anchor — only ever samples
+ONE real instance, eliminating cross-row jitter smearing and exposure to unrelated photo content.
+  fixed-singlecell-fold-mask.png — clean, single, non-doubled fold; no diagonal artifact.
+  fixed-full-canvas-result.png — full-canvas fill result after the fix: every instance processed
+  uniformly (23-33% pixel change per row, verified via getImageData — not just the boxed row).
+
+REMAINING CHARACTERISTIC (NOT a #60 regression — proven pre-existing, tracked as #54):
+  original-unfilled-row1-for-comparison.png — the crisp original watermark rendering.
+  fixed-new-path-row1-matches-baseline.png — after fill (new #60 path): pale, soft-edged letterform
+  residue remains (detectWatermark's mask is edge/stroke-only, doesn't capture solid glyph interiors;
+  dilate:1 isn't enough to fully reach the interior).
+  baseline-preexisting-old-path-row1.png — the ALREADY-SHIPPED, pre-#60, single-boxed-word-only fill
+  on the SAME row, using the OLD mechanism entirely (no #60 code involved) — visually indistinguishable
+  from the new result. Proves the residue is a pre-existing `detectWatermark`/`fillMaskRegion`
+  limitation (issue #54), not something #60 introduced. #60 correctly applies this SAME baseline
+  treatment to all 18 instances instead of just the boxed one — which is the actual #60 goal.
+
+See LEARNINGS.md CORE-28 (the fold-contamination bug + fix) and CORE-29 (a `take_screenshot`
+staleness trap hit while investigating — use `toDataURL`/`getImageData` for canvas pixel ground
+truth, not `take_screenshot` alone).

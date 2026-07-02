@@ -1096,6 +1096,137 @@ describe('recolour engine', function () {
     })
   })
 
+  // foldMaskToCell (#60) — phrase-level seed expansion. Fold every set pixel of a content mask modulo
+  // the lattice into ONE fundamental cell so the seed spans the full repeating unit (both words of
+  // "TAYLOR GALE"), making one box remove the whole phrase whichever word was boxed. The two guarded
+  // traps (LEARNINGS CORE-26/27): the fold MUST use floor (round clips the negative-residual half and
+  // silently drops ~half the content), and the anchor MUST be lattice-canonical (seed-independent).
+  describe('foldMaskToCell / phrase expansion (#60)', function () {
+    this.timeout(15000) // the real-fixture case runs detectWatermark(whole) + detectTextTiling
+
+    function pix (W, H, pts) { // build a mask from [x,y] points
+      const m = new Uint8Array(W * H)
+      for (const [x, y] of pts) m[y * W + x] = 1
+      return m
+    }
+    function pts (mask, W) { // set pixels as "x,y" strings
+      const s = []
+      for (let p = 0; p < mask.length; p++) if (mask[p]) s.push((p % W) + ',' + ((p / W) | 0))
+      return s.sort()
+    }
+    const W = 200, H = 200
+    const V0 = { x: 60, y: 0 }, V1 = { x: 0, y: 50 } // cell [0,60) x [0,50), det = 3000
+
+    // CORE-26: floor keeps a pixel at the cell's FAR edge (x=55 in a 60-wide cell). Under round the
+    // coefficient 55/60=0.917 snaps to node 1 -> residual -5 -> clipped -> that content silently lost.
+    it('floor (not round) preserves far-edge content — CORE-26 guard', function () {
+      const out = engine.foldMaskToCell(pix(W, H, [[5, 5], [55, 5]]), W, H, [V0, V1])
+      assert.deepStrictEqual(pts(out, W), ['5,5', '55,5'],
+        'both blobs must survive the fold; a round-based fold would drop 55,5')
+    })
+
+    // Modulo: content in distant cells folds ONTO the fundamental cell (65 -> 5, 125 -> 5).
+    it('folds distant lattice cells onto the fundamental cell', function () {
+      const out = engine.foldMaskToCell(pix(W, H, [[5, 5], [65, 5], [125, 5]]), W, H, [V0, V1])
+      assert.deepStrictEqual(pts(out, W), ['5,5'], 'all three x-positions collapse to one cell column')
+    })
+
+    // Idempotence: an already-folded mask is unchanged by a second fold — proves the residual is truly
+    // in-cell (a round-based or mis-anchored fold would keep shifting content).
+    it('is idempotent: fold(fold(m)) === fold(m)', function () {
+      const once = engine.foldMaskToCell(pix(W, H, [[5, 5], [65, 5], [5, 55], [175, 130]]), W, H, [V0, V1])
+      const twice = engine.foldMaskToCell(once, W, H, [V0, V1])
+      assert.deepStrictEqual(pts(twice, W), pts(once, W), 'a second fold must be a no-op')
+    })
+
+    // 1-D basis: a single vector collapses content onto one period, preserving the free axis.
+    it('1-D basis collapses onto a single period', function () {
+      const out = engine.foldMaskToCell(pix(W, H, [[5, 5], [65, 5], [125, 7]]), W, H, [V0])
+      assert.deepStrictEqual(pts(out, W), ['5,5', '5,7'], 'x folds mod 60; y is untouched')
+    })
+
+    it('empty / no-basis inputs return an empty mask without throwing', function () {
+      const popcount = (m) => m.reduce((a, b) => a + b, 0)
+      assert.strictEqual(popcount(engine.foldMaskToCell(new Uint8Array(W * H), W, H, [V0, V1])), 0,
+        'empty input mask -> empty output')
+      assert.strictEqual(popcount(engine.foldMaskToCell(pix(W, H, [[5, 5]]), W, H, [])), 0,
+        'no basis -> nothing folded (caller guards; defensive)')
+    })
+
+    // ---- real fixture: the #60 invariance claim (mirrors the spike M1 structure gate) ----
+    // Boxing "TAYLOR" or "GALE" on repeated-tile-template.jpg must yield the SAME propagation
+    // structure (one box, one fill, whole phrase — regardless of which word was boxed). This is the
+    // runTile() expansion path AS SHIPPED: detect ONCE within the boxed instance's OWN lattice cell
+    // (latticeCellOrigin), not a whole-image mask. A whole-image-fold version of this test was tried
+    // first and passed on structure/coverage METRICS alone — but live QA (real photo fixture) found
+    // it corrupts the actual BFS fill (mountain-silhouette noise + cross-row jitter smearing), a
+    // failure mode invisible to mask-only assertions. This test locks in the FIXED mechanism.
+    it('#60 real fixture: TAYLOR-box and GALE-box expand to the same propagation structure', async function () {
+      const _Jimp = require('jimp'); const Jimp = _Jimp.default || _Jimp // CORE-1: ESM/CJS interop
+      const jimg = await Jimp.read('./test/files/repeated-tile-template.jpg')
+      const img = { data: jimg.bitmap.data, width: jimg.bitmap.width, height: jimg.bitmap.height }
+      const profile = { edgeThreshold: 150, preContrast: false } // GUI DETECT_PROFILE (app.js)
+      const taylor = { x: 330, y: 32, width: 150, height: 46 } // spike: 'r1 mid TAYLOR'
+      const gale = { x: 500, y: 32, width: 110, height: 46 }   // spike: 'r1 mid GALE'
+
+      function expand (seed) {
+        const basis = engine.detectTextTiling(img, seed).tileBasis
+        assert.ok(basis.length >= 1, `seed must tile: ${JSON.stringify(seed)}`)
+        const v0 = basis[0], v1 = basis[1] || null
+        const cellW = Math.abs(v0.x) + (v1 ? Math.abs(v1.x) : 0) || seed.width
+        const cellH = Math.abs(v0.y) + (v1 ? Math.abs(v1.y) : 0) || seed.height
+        const node = engine.latticeCellOrigin(seed.x, seed.y, basis)
+        const x0 = Math.max(0, Math.min(img.width, node.x)), y0 = Math.max(0, Math.min(img.height, node.y))
+        const win = {
+          x: x0, y: y0,
+          width: Math.max(0, Math.min(img.width, node.x + cellW) - x0),
+          height: Math.max(0, Math.min(img.height, node.y + cellH) - y0)
+        }
+        const cellContent = engine.detectWatermark(img, profile, win).mask
+        const folded = engine.foldMaskToCell(cellContent, img.width, img.height, basis) // → canonical
+        return engine.propagateMask(folded, img.width, img.height, basis, { frameCanonical: true })
+      }
+      const t = expand(taylor), g = expand(gale)
+      assert.strictEqual(t.instances, g.instances, `instances must match: TAYLOR=${t.instances} GALE=${g.instances}`)
+      assert.strictEqual(t.rows, g.rows, `rows must match: TAYLOR=${t.rows} GALE=${g.rows}`)
+      assert.strictEqual(t.cols, g.cols, `cols must match: TAYLOR=${t.cols} GALE=${g.cols}`)
+    })
+  })
+
+  // latticeCellOrigin (#60 build QA fix) — which lattice node's cell contains a point? Shared
+  // floor-based lattice-index math with foldMaskToCell, exposed as a single-point query so runTile()
+  // can build a ONE-CELL detection window (the fix for the whole-image-fold contamination above).
+  describe('latticeCellOrigin (#60)', function () {
+    const V0 = { x: 0, y: 113 }, V1 = { x: 415, y: 0 } // mirrors the real-fixture basis
+
+    it('a point in the canonical (0,0) cell returns origin (0,0)', function () {
+      assert.deepStrictEqual(engine.latticeCellOrigin(50, 30, [V0, V1]), { x: 0, y: 0 })
+    })
+
+    it('a point one cell over on each axis returns that node', function () {
+      assert.deepStrictEqual(engine.latticeCellOrigin(500, 32, [V0, V1]), { x: 415, y: 0 },
+        'x=500 is in the SECOND column cell (415<=x<830)')
+      assert.deepStrictEqual(engine.latticeCellOrigin(10, 150, [V0, V1]), { x: 0, y: 113 },
+        'y=150 is in the SECOND row cell (113<=y<226)')
+    })
+
+    it('is consistent with foldMaskToCell: folding content translates it by exactly -node', function () {
+      const W = 900, H = 600
+      const mask = new Uint8Array(W * H)
+      mask[268 * W + 100] = 1 // a point in the SAME cell as the (330,268) query below (col 0, row 2)
+      const node = engine.latticeCellOrigin(330, 268, [V0, V1])
+      const folded = engine.foldMaskToCell(mask, W, H, [V0, V1])
+      const expectedX = 100 - node.x, expectedY = 268 - node.y
+      assert.strictEqual(folded[expectedY * W + expectedX], 1,
+        `point should land at (100-${node.x}, 268-${node.y}) after folding`)
+    })
+
+    it('1-D basis and degenerate/no-basis inputs do not throw', function () {
+      assert.deepStrictEqual(engine.latticeCellOrigin(65, 5, [{ x: 60, y: 0 }]), { x: 60, y: 0 })
+      assert.deepStrictEqual(engine.latticeCellOrigin(5, 5, []), { x: 0, y: 0 })
+    })
+  })
+
   // Anchor -> propagate (#47, T29 Phase 3 DoD). Two gaps remained after #52 shipped the FFT
   // propagate/confirm machinery: (1) the confirm card needs the lattice geometry (rows/cols), and
   // (2) a regression test proving anchor->propagate recovers tiled instances a per-blob pass misses.

@@ -1468,6 +1468,114 @@
   }
 
   // =============================================================================================
+  // foldMaskToCell (#60, T29 follow-up) — phrase-level seed expansion.
+  //
+  // On a letter-form phrase watermark ("TAYLOR GALE" repeated), detectTextTiling's fitted period
+  // ALREADY equals the full phrase width, but detectWatermark only returns the ONE word the user
+  // boxed — so propagateMask stamps a partial grid (box TAYLOR -> GALE survives, and vice-versa).
+  // The fix is SEED EXPANSION, not re-fitting: translate a content mask (the caller supplies ONE
+  // lattice cell's worth of real content — see latticeCellOrigin below; a whole-image mask was tried
+  // first and rejected, see the caller note in runTile()) to the canonical fundamental cell via the
+  // same floor-based modulo used for a full fold. propagateMask then stamps that unit across the grid
+  // -> one box, one fill, identical result whichever word was boxed. Mechanism validated (mask-
+  // coverage metrics only) in scripts/spike-phrase-tiling-60.js; fill-quality bug + fix found live in
+  // the #60 build QA session (see runTile()'s #60 comment for the two failure modes and the fix).
+  //
+  // TWO CORRECTNESS TRAPS (do NOT "simplify" either — both silently corrupt the fold):
+  //   1. FLOOR, not round (CORE-26). The in-cell residual comes from FLOORing each pixel's lattice
+  //      coefficients, giving a true modulo into [0, cell) with a NON-NEGATIVE residual. Math.round
+  //      snaps to the NEAREST node -> residuals in [-half,+half]; the negative half maps to fx<0 and
+  //      is clipped by the bounds check, silently discarding ~half the content (a whole word).
+  //   2. Anchor is lattice-CANONICAL, not the boxed seed's position (CORE-27). A fixed anchor (default
+  //      (0,0)) folds the SAME content into the SAME absolute cell regardless of which instance was
+  //      boxed -> position-invariant by construction. Anchoring at the seed defeats that.
+  //
+  // Pure: reads `mask`, allocates its own output, mutates nothing — Node-testable (TEST-2).
+  //
+  // @param {Uint8Array} mask   width*height content mask (e.g. detectWatermark(one-lattice-cell).mask —
+  //        see latticeCellOrigin; a whole-image mask also works but risks cross-instance contamination).
+  // @param {number} width
+  // @param {number} height
+  // @param {Array<{x:number,y:number}>} basis  1 or 2 lattice vectors (detectTextTiling().tileBasis).
+  //        2 vectors -> fold into a 2-D parallelogram cell; 1 -> collapse onto a single period.
+  // @param {{x:number,y:number}} [anchor]  fundamental-cell origin. Default {x:0,y:0} (canonical).
+  // @returns {Uint8Array} fresh full-frame mask with the folded unit placed at the anchor cell.
+  function foldMaskToCell (mask, width, height, basis, anchor) {
+    var out = new Uint8Array(mask.length)
+    var O = anchor || { x: 0, y: 0 }
+    var v0 = basis && basis[0]
+    if (!v0) return out // no lattice -> nothing to fold (caller guards; defensive)
+    var v1 = basis[1] || null
+    var det = v1 ? (v0.x * v1.y - v0.y * v1.x) : 0
+    var v0sq = v0.x * v0.x + v0.y * v0.y
+    for (var p = 0; p < mask.length; p++) {
+      if (!mask[p]) continue
+      var px = p % width, py = (p / width) | 0
+      var rx = px - O.x, ry = py - O.y, fx, fy
+      if (v1 && Math.abs(det) > 1e-9) {
+        // Integer lattice indices via the 2x2 inverse of [v0 v1]; FLOOR -> true modulo (trap #1).
+        var i = Math.floor((rx * v1.y - ry * v1.x) / det)
+        var j = Math.floor((-rx * v0.y + ry * v0.x) / det)
+        fx = px - i * v0.x - j * v1.x
+        fy = py - i * v0.y - j * v1.y
+      } else if (v0sq > 0) {
+        var t = Math.floor((rx * v0.x + ry * v0.y) / v0sq)
+        fx = px - t * v0.x
+        fy = py - t * v0.y
+      } else {
+        continue // degenerate basis
+      }
+      fx = Math.round(fx); fy = Math.round(fy) // integer pixel index (residual is already in-cell)
+      if (fx < 0 || fx >= width || fy < 0 || fy >= height) continue
+      out[fy * width + fx] = 1
+    }
+    return out
+  }
+
+  // latticeCellOrigin (#60 build QA fix) — which lattice node's cell contains point (x,y)?
+  //
+  // WHY THIS EXISTS: the spike's whole-image fold (foldMaskToCell fed by a whole-frame
+  // detectWatermark) turned out to corrupt the seed on real photos — two failure modes only visible
+  // once the actual fill pipeline ran (the spike validated mask COVERAGE metrics, never fill
+  // quality): (1) unrelated photographic edges (e.g. a mountain silhouette) get picked up by
+  // whole-image Sobel and folded into the cell as noise; (2) the real watermark's own per-row content
+  // has a few px of mutual jitter, so folding 3+ rows together SMEARS the shape instead of producing
+  // one crisp unit. Both corrupt fillMaskRegion's BFS reconstruction into pale/white blob artifacts.
+  //
+  // THE FIX: instead of detecting across the whole frame, detect ONCE within the seed's OWN lattice
+  // cell (a single real instance — no cross-row/cross-instance mixing, no distant photo content), then
+  // fold/translate that ONE clean detection to the canonical anchor for stamping. This function finds
+  // that cell's origin (same floor-based lattice-index math as foldMaskToCell, but for a single point
+  // instead of a whole mask) so the caller can build the one-cell detection window.
+  //
+  // @param {number} x
+  // @param {number} y
+  // @param {Array<{x:number,y:number}>} basis  1 or 2 lattice vectors.
+  // @param {{x:number,y:number}} [anchor]  Default {x:0,y:0} (canonical).
+  // @returns {{x:number,y:number}} the lattice node (image px) whose cell contains (x,y).
+  function latticeCellOrigin (x, y, basis, anchor) {
+    var O = anchor || { x: 0, y: 0 }
+    var v0 = basis && basis[0]
+    if (!v0) return { x: 0, y: 0 }
+    var v1 = basis[1] || null
+    var rx = x - O.x, ry = y - O.y
+    if (v1) {
+      var det = v0.x * v1.y - v0.y * v1.x
+      if (Math.abs(det) > 1e-9) {
+        var i = Math.floor((rx * v1.y - ry * v1.x) / det)
+        var j = Math.floor((-rx * v0.y + ry * v0.x) / det)
+        return { x: i * v0.x + j * v1.x, y: i * v0.y + j * v1.y }
+      }
+    }
+    var v0sq = v0.x * v0.x + v0.y * v0.y
+    if (v0sq > 0) {
+      var t = Math.floor((rx * v0.x + ry * v0.y) / v0sq)
+      return { x: t * v0.x, y: t * v0.y }
+    }
+    return { x: 0, y: 0 } // degenerate basis
+  }
+
+  // =============================================================================================
   // propagateMask (#46, T29 Phase 3) — stamp one confirmed watermark instance across the lattice.
   //
   // DESIGN PRINCIPLE (preserve): recolour's differentiator is FIND-AND-MASK EVERY INSTANCE *before*
@@ -1618,6 +1726,8 @@
     detectWatermark: detectWatermark,
     detectTiling: detectTiling,
     detectTextTiling: detectTextTiling,
+    foldMaskToCell: foldMaskToCell,
+    latticeCellOrigin: latticeCellOrigin,
     propagateMask: propagateMask
   }
 })

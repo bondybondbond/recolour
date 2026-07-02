@@ -57,6 +57,7 @@
   var tileCount = document.getElementById('tileCount')
   var tileBand = document.getElementById('tileBand')
   var tileMode = document.getElementById('tileMode')
+  var tileExpanded = document.getElementById('tileExpanded') // #60 phrase-expansion note (static in shell)
   var tileSubchip = document.getElementById('tileSubchip')
   var tileAccept = document.getElementById('tileAccept')
   var tileCancel = document.getElementById('tileCancel')
@@ -1121,7 +1122,7 @@
     var seed = Engine.detectWatermark(baseImageData, DETECT_PROFILE, region).mask
     var t = Engine.detectTiling(baseImageData, { region: region })
     var basis = t.tileBasis
-    var textMode = false, textConfidence = 0
+    var textMode = false, textConfidence = 0, expanded = false
     // [TRAP]: `region` here is still the RAW GUI {x,y,width,height}. detectTiling's internal
     // clampRegion() returns a FRESH bbox and does NOT mutate `region`, so the SAME `region` is correct
     // to hand to detectTextTiling. If a future edit makes detectTiling normalise region in place, this
@@ -1130,6 +1131,38 @@
     if (t.combCount < t.combMin) { // FFT comb failed → text/NCC fallback for letter-form marks (#53). No magic 5.
       var tt = Engine.detectTextTiling(baseImageData, region)
       if (tt.tiling) { basis = tt.tileBasis; textMode = true; textConfidence = tt.confidence }
+    }
+    // Phrase-level seed expansion (#60): a letter-form phrase ("TAYLOR GALE") gives detectTextTiling a
+    // lattice whose period ALREADY spans the full phrase, but the boxed seed is only ONE word — so the
+    // stamped grid is partial (box TAYLOR → GALE survives). Detect ONCE within the boxed instance's OWN
+    // lattice cell (full phrase width, one real instance — not the whole image) so the seed spans the
+    // full repeating unit, then fold/translate that single clean detection to the canonical anchor for
+    // stamping → one box removes the whole phrase. Scoped to the text/NCC path only.
+    //
+    // NOT a whole-image detectWatermark + fold (the original #60 build attempt): live QA on a real photo
+    // fixture (repeated-tile-template.jpg) found that corrupts the seed two ways, both invisible to the
+    // spike's mask-coverage-only metrics (it never exercised the real fillMaskRegion/BFS pipeline) — (1)
+    // unrelated photographic edges (a mountain silhouette) get picked up by whole-image Sobel and folded
+    // in as noise, (2) the real watermark's per-row content has a few px of mutual jitter, so folding 3+
+    // rows together SMEARS the shape. Both corrupted the BFS reconstruction into pale/white blob
+    // artifacts on accept. Single-cell detection only ever samples ONE real instance — no cross-row/
+    // cross-instance mixing, no distant photo content — eliminating both failure modes.
+    if (textMode && basis && basis.length >= 1) {
+      var v0 = basis[0], v1 = basis[1] || null
+      var cellW = Math.abs(v0.x) + (v1 ? Math.abs(v1.x) : 0) || region.width
+      var cellH = Math.abs(v0.y) + (v1 ? Math.abs(v1.y) : 0) || region.height
+      var node = Engine.latticeCellOrigin(region.x, region.y, basis)
+      var winX0 = Math.max(0, Math.min(canvas.width, node.x))
+      var winY0 = Math.max(0, Math.min(canvas.height, node.y))
+      var win = {
+        x: winX0,
+        y: winY0,
+        width: Math.max(0, Math.min(canvas.width, node.x + cellW) - winX0),
+        height: Math.max(0, Math.min(canvas.height, node.y + cellH) - winY0)
+      }
+      var cellContent = Engine.detectWatermark(baseImageData, DETECT_PROFILE, win).mask
+      seed = Engine.foldMaskToCell(cellContent, canvas.width, canvas.height, basis) // → canonical anchor
+      expanded = true
     }
     // frameCanonical (#57): count instances from the lattice + frame, not the seed's own bbox, so the
     // confirm-card count is identical no matter which instance the user boxed (CORE-23). Removal mask is
@@ -1147,10 +1180,11 @@
       textMode: textMode,
       textConfidence: textConfidence,
       wholeImageBox: wholeImageBox,
+      expanded: expanded,
       tileDoubled: false
     }
     paintTileOverlay(prop.mask)
-    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence, wholeImageBox)
+    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence, wholeImageBox, expanded)
     restoreDetectHint() // clear the "detecting…" notice — the card now carries the status
   }
 
@@ -1196,8 +1230,13 @@
     return n + ' · ' + rows + ' rows × ' + cols + ' column' + (cols === 1 ? '' : 's')
   }
 
-  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence, wholeImageBox) {
+  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence, wholeImageBox, expanded) {
     tileCount.textContent = tileCountText(instances, rows, cols)
+    // #60 phrase-expansion note: tell the user WHY the overlay covers more than they boxed (the seed
+    // was expanded to the full repeating unit). Only fires on the text/NCC expansion path; hidden
+    // otherwise. `if (tileExpanded)` guard: the element is static in the shell, but a defensive null
+    // guard costs nothing and avoids a silent throw if the confirm card is ever injected dynamically.
+    if (tileExpanded) tileExpanded.style.display = expanded ? 'block' : 'none'
     if (textMode) {
       // Text/NCC fallback path (#53): no combCount — the band is driven by the lattice-match
       // confidence (already gated >= 0.5). The "Detected by text-shape matching" label tells the user

@@ -1,0 +1,122 @@
+SPIKE #56 — auto-anchor: lattice-validated automatic seed for tile-fill
+date 2026-07-02   engine=web/recolour-engine.js (shipped)   TOP_K=6  SIZE_TOL=0.3
+
+=== ACCEPTANCE: repeated-tile-template.jpg  900x600 ===
+  funnel[accept]: letters=102 words=57 filtered=23 eligible(peers>=2) -> top6
+      topK  274,32 129x51    peers=7   area=6579 idx=18
+      topK  272,142 127x51   peers=7   area=6477 idx=41
+      topK  276,374 123x49   peers=7   area=6027 idx=50
+      topK  691,147 123x46   peers=7   area=5658 idx=44
+      topK  691,374 123x46   peers=7   area=5658 idx=52
+      topK  691,487 123x46   peers=7   area=5658 idx=56
+      surv  274,32 129x51    conf=1      peaks=10  basis=(0,113) (415,0)
+      surv  272,142 127x51   conf=1      peaks=13  basis=(0,113) (415,0)
+      surv  276,374 123x49   conf=1      peaks=12  basis=(0,113) (415,0)
+      surv  691,147 123x46   conf=1      peaks=11  basis=(0,113) (415,0)
+      surv  691,374 123x46   conf=1      peaks=10  basis=(0,113) (415,0)
+      surv  691,487 123x46   conf=1      peaks=11  basis=(0,113) (415,0)
+  retrieval: true-word best-match merged candidate idx=18 bboxIoU=0.33 inTopK=true
+  retrieval OK — true word merged and retained in top-K
+  WINNER: 272,142 127x51 conf=1.000 peaks=13 basis=(0,113) (415,0)
+
+  M1 downstream compare (auto vs hand-boxed baseline):
+    baseline : basis=(0,113) (415,0) instances=18 3x6 area=56149 occupied-cells=18
+    auto     : basis=(0,113) (415,0) instances=18 3x6 area=52064 occupied-cells=18
+    GRID-PHASE cell Jaccard=1.000  (same lattice cells occupied? phase/coverage gate)
+    DIAGNOSTIC (not gated): node-centroid mean=15.7px maskIoU=0.463 — intra-cell content delta = the deferred #62 seed-footprint issue (CORE-25), NOT lattice error
+    M1 (basis + 18/3x6 + grid-phase cells): PASS
+  wrote scripts\evidence\spike-auto-anchor-56\accept-auto-mask.png
+  wrote scripts\evidence\spike-auto-anchor-56\accept-baseline-mask.png
+
+=== M2 DETERMINISM ===
+  natural-order winner : 272,142 127x51|(0,113) (415,0)
+  reversed-order winner: 272,142 127x51|(0,113) (415,0)
+  M2 (order-invariant winner): PASS
+
+=== M3 NEGATIVES (each MUST abstain -> null) ===
+  funnel[kids1.jpg]: letters=104 words=71 filtered=33 eligible(peers>=2) -> top6
+      topK  211,87 36x21     peers=12  area=756 idx=23
+      topK  441,14 35x21     peers=12  area=735 idx=7
+      topK  211,63 35x21     peers=12  area=735 idx=15
+      topK  96,75 35x21      peers=12  area=735 idx=19
+      topK  326,75 35x21     peers=12  area=735 idx=20
+      topK  556,75 35x21     peers=12  area=735 idx=22
+      survivors: NONE (structural)
+  kids1.jpg                                  survivors=0 bestConf=0.000 -> ABSTAIN(structural)
+  funnel[high_resolution_flying_eagle_4k_8k_hd.jpg]: letters=412 words=224 filtered=120 eligible(peers>=2) -> top6
+      topK  3875,2263 30x22  peers=18  area=660 idx=68
+      topK  2655,1952 30x21  peers=18  area=630 idx=28
+      topK  3747,2335 30x30  peers=16  area=900 idx=94
+      topK  3352,2891 41x17  peers=16  area=697 idx=191
+      topK  3044,2687 29x17  peers=16  area=493 idx=132
+      topK  3536,2455 41x21  peers=15  area=861 idx=112
+      survivors: NONE (structural)
+  high_resolution_flying_eagle_4k_8k_hd.jpg  survivors=0 bestConf=0.000 -> ABSTAIN(structural)
+  funnel[logo.png]: letters=7 words=5 filtered=5 eligible(peers>=2) -> top6
+      survivors: NONE (structural)
+  logo.png                                   survivors=0 bestConf=0.000 -> ABSTAIN(structural)
+  funnel[copyright-watermark.png]: letters=151 words=66 filtered=27 eligible(peers>=2) -> top6
+      topK  0,401 34x20      peers=4   area=680 idx=17
+      topK  3,486 40x17      peers=4   area=680 idx=52
+      topK  113,496 31x16    peers=4   area=496 idx=58
+      topK  711,383 54x23    peers=3   area=1242 idx=16
+      topK  471,465 27x14    peers=3   area=378 idx=44
+      topK  110,430 22x12    peers=3   area=264 idx=27
+      survivors: NONE (structural)
+  copyright-watermark.png                    survivors=0 bestConf=0.000 -> ABSTAIN(structural)
+
+================= GO / NO-GO =================
+  acceptance winner conf : 1.000
+  best negative survivor : 0.000  (kids1=0.00, high_resolution_flying_eagle_4k_8k_hd=0.00, logo=0.00, copyright-watermark=0.00)
+  MARGIN (accept - neg)  : 1.000
+  suggested tau (midpoint): 0.000  (all negatives structural — tau not even needed)
+
+  M1 coverage match     : PASS
+  M2 determinism        : PASS
+  M3 negatives separable: PASS (margin 1.000)
+  M4 cost (accept)      : 6 detectTextTiling calls, 1266ms wall
+  VERDICT: GO
+=============================================
+
+CORE-28 REMINDER: this spike gates on mask/node coverage, NOT a rendered BFS fill. The BUILD
+session MUST run a real-photo fillMaskRegion QA pass before shipping auto-anchor.
+
+================= FINDINGS (research results) =================
+F1. Whole-image detectWatermark FRAGMENTS text into per-LETTER blobs — there is NO whole-word
+    candidate, and detectTextTiling correctly rejects single letters (#58 fragment gate). Raw
+    components CANNOT seed auto-anchor. => a seed-PROPOSAL stage (merge per-row adjacent
+    letters into word/phrase bboxes) is mandatory. This is the funnel's highest-risk stage,
+    exactly as flagged in the plan: a retrieval miss here no score can fix.
+F2. detectTextTiling.confidence (= explainedFrac) is NOT a discriminating score: sparse/
+    spurious lattices reach conf=1.0 (logo sub-regions; copyright 31x16 diagonal-texture seed).
+    Confidence-margin alone gives ZERO separation (accept 1.0 vs neg 1.0). Two CHEAP,
+    principled gates separate real text grids instead of tuning weights:
+      (a) size-cluster PEER eligibility (peers>=2): a seed must visibly repeat in raw
+          detection. Kills logo (unique-size regions, peers=0) with no NCC cost.
+      (b) AXIS-ALIGNED grid gate (<=10deg): real text lattices are axis-aligned
+          ((0,113)(415,0)); spurious texture locks a diagonal basis ((55,218)(204,-128)).
+          Kills the copyright false positive.
+F3. M1 must gate on GRID-PHASE (same lattice cells occupied: Jaccard 1.000), NOT pixel IoU
+    or node-centroid distance. The auto seed folds THINNER intra-cell content than a hand box
+    (52k vs 56k px, centroid mean 15.7px) — that is the deferred #62 seed-footprint issue
+    (CORE-25 count/fill decoupling), NOT a lattice error. Node COVERAGE (18/3x6) is identical.
+
+================= HAND-OFF PARAMS (for the build) =================
+  Funnel: detectWatermark(whole-image) -> mergeIntoWords(rowOverlap>=0.5*minH, gap<=1.2*H)
+          -> sizeClusterPrior(SIZE_TOL=0.3) -> eligible(peers>=2)
+          -> rankByPrior(peers desc, area desc, raster idx) -> top6
+          -> detectTextTiling per candidate -> survivor = tiling && axisMisalign<=10deg
+          -> winner = max conf, tie peaks desc, tie raster idx
+          -> abstain reason codes: no_candidates | no_lattice | low_confidence
+  Downstream after winner = runTile() verbatim (single-cell #60 fold + propagateMask frameCanonical).
+  tau: NOT needed on current fixtures (all negatives abstain STRUCTURALLY). Keep a low-conf
+       floor as defence-in-depth for future fixtures, but the structural gates carry M3 today.
+  autoAnchorSeed() -> { region, basis, confidence, reason } | null (reason aids GUI/QA).
+
+================= LEARNINGS CANDIDATES =================
+  CORE-nn: auto-anchor seed proposal must MERGE letters into words — whole-image detectWatermark
+           fragments text; single-letter seeds are rejected by the #58 fragment gate. (F1)
+  CORE-nn: explainedFrac is not a seed discriminator; gate on size-cluster PEER support +
+           AXIS-ALIGNED basis instead (both cheap, no extra NCC). (F2)
+  TEST-nn: validate auto-anchor coverage by GRID-CELL Jaccard, not pixel IoU / node-centroid
+           distance — intra-cell thickness is the deferred #62 issue, not a lattice error. (F3)

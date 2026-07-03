@@ -58,6 +58,7 @@
   var tileBand = document.getElementById('tileBand')
   var tileMode = document.getElementById('tileMode')
   var tileExpanded = document.getElementById('tileExpanded') // #60 phrase-expansion note (static in shell)
+  var tileAutoSeed = document.getElementById('tileAutoSeed') // #56 auto-anchor note (static in shell)
   var tileSubchip = document.getElementById('tileSubchip')
   var tileAccept = document.getElementById('tileAccept')
   var tileCancel = document.getElementById('tileCancel')
@@ -1091,14 +1092,10 @@
       return
     }
     if (!baseImageData) { setTile(false); return }
-    // Tile-fill needs a seed: the committed region box around one watermark instance. Turn the
-    // button back off, THEN set the hint (setTile(false) calls restoreDetectHint, which would wipe a
-    // hint set before it).
-    if (!region) {
-      setTile(false)
-      setDetectHint('▢ Box one watermark instance first (Select area), then Tile-fill', true)
-      return
-    }
+    // #56: no box required anymore — when !region, runTile() calls Engine.autoAnchorSeed() to
+    // self-select a seed (the two-tap flow). A manual box still OVERRIDES auto-anchor. The abstain
+    // case (no repeating watermark found) is handled inside runTile(), not here — it needs the engine
+    // result to know whether to fall back to the manual-box hint.
     if (detectOn) setDetect(false) // only one canvas overlay at a time
     // Large-image guard (#43): detectTiling's multi-radius FFT is heavy. Warn FIRST, then defer one
     // tick so the notice paints before the main thread freezes.
@@ -1111,25 +1108,42 @@
   }
 
   function runTile () {
-    if (!tileOn || !baseImageData || !region) return
-    // Whole-image-box guard (#58): if the box ≈ the whole frame, the template ≈ the frame, leaving no
-    // NCC search room — detection can only ever fail, and today it shows the confusing "Not detected by
-    // current threshold". Detect that case and show actionable guidance instead. The 0.85 threshold is
-    // an UN-DERIVED heuristic placeholder — do NOT treat it as validated; #56 (auto-anchor) removes the
-    // manual box and this guard with it.
-    var wholeImageBox = (region.width * region.height) / (canvas.width * canvas.height) >= 0.85
-    // Seed shape = the detected watermark glyph(s) inside the user's box (edge-based, colour-agnostic).
-    var seed = Engine.detectWatermark(baseImageData, DETECT_PROFILE, region).mask
-    var t = Engine.detectTiling(baseImageData, { region: region })
+    if (!tileOn || !baseImageData) return
+    // #56 auto-anchor: with no manual box, self-select a seed by cross-validating detectWatermark
+    // candidates against the NCC text lattice (Engine.autoAnchorSeed). A manual `region` OVERRIDES it.
+    // `seedRegion` is what the whole downstream operates on — identical to the spike's downstream(),
+    // which took only a region. On abstain (null) there is no repeating watermark to auto-seed: fall
+    // back to the manual-box hint and turn Tile-fill off (no crash, no empty card).
+    var autoSeeded = false
+    var seedRegion = region
+    if (!seedRegion) {
+      var auto = Engine.autoAnchorSeed(baseImageData, DETECT_PROFILE)
+      if (!auto) {
+        setTile(false)
+        setDetectHint('▢ No repeating watermark auto-detected — box one instance manually (Select area), then Tile-fill', true)
+        return
+      }
+      seedRegion = auto.region
+      autoSeeded = true
+    }
+    // Whole-image-box guard (#58): if a MANUAL box ≈ the whole frame, the template ≈ the frame, leaving
+    // no NCC search room — detection can only ever fail, and today it shows the confusing "Not detected
+    // by current threshold". Detect that case and show actionable guidance instead. The 0.85 threshold
+    // is an UN-DERIVED heuristic placeholder — do NOT treat it as validated. Auto-anchor picks a small
+    // instance bbox, so this is effectively manual-box-only.
+    var wholeImageBox = (seedRegion.width * seedRegion.height) / (canvas.width * canvas.height) >= 0.85
+    // Seed shape = the detected watermark glyph(s) inside the seed region (edge-based, colour-agnostic).
+    var seed = Engine.detectWatermark(baseImageData, DETECT_PROFILE, seedRegion).mask
+    var t = Engine.detectTiling(baseImageData, { region: seedRegion })
     var basis = t.tileBasis
     var textMode = false, textConfidence = 0, expanded = false
-    // [TRAP]: `region` here is still the RAW GUI {x,y,width,height}. detectTiling's internal
-    // clampRegion() returns a FRESH bbox and does NOT mutate `region`, so the SAME `region` is correct
-    // to hand to detectTextTiling. If a future edit makes detectTiling normalise region in place, this
-    // NCC call silently gets the wrong template bbox — guarded by a regression test (test/engine.js).
-    // Do NOT pass a derived/clamped region here.
+    // [TRAP]: `seedRegion` here is still a RAW {x,y,width,height}. detectTiling's internal clampRegion()
+    // returns a FRESH bbox and does NOT mutate it, so the SAME seedRegion is correct to hand to
+    // detectTextTiling. If a future edit makes detectTiling normalise region in place, this NCC call
+    // silently gets the wrong template bbox — guarded by a regression test (test/engine.js). Do NOT
+    // pass a derived/clamped region here.
     if (t.combCount < t.combMin) { // FFT comb failed → text/NCC fallback for letter-form marks (#53). No magic 5.
-      var tt = Engine.detectTextTiling(baseImageData, region)
+      var tt = Engine.detectTextTiling(baseImageData, seedRegion)
       if (tt.tiling) { basis = tt.tileBasis; textMode = true; textConfidence = tt.confidence }
     }
     // Phrase-level seed expansion (#60): a letter-form phrase ("TAYLOR GALE") gives detectTextTiling a
@@ -1149,9 +1163,9 @@
     // cross-instance mixing, no distant photo content — eliminating both failure modes.
     if (textMode && basis && basis.length >= 1) {
       var v0 = basis[0], v1 = basis[1] || null
-      var cellW = Math.abs(v0.x) + (v1 ? Math.abs(v1.x) : 0) || region.width
-      var cellH = Math.abs(v0.y) + (v1 ? Math.abs(v1.y) : 0) || region.height
-      var node = Engine.latticeCellOrigin(region.x, region.y, basis)
+      var cellW = Math.abs(v0.x) + (v1 ? Math.abs(v1.x) : 0) || seedRegion.width
+      var cellH = Math.abs(v0.y) + (v1 ? Math.abs(v1.y) : 0) || seedRegion.height
+      var node = Engine.latticeCellOrigin(seedRegion.x, seedRegion.y, basis)
       var winX0 = Math.max(0, Math.min(canvas.width, node.x))
       var winY0 = Math.max(0, Math.min(canvas.height, node.y))
       var win = {
@@ -1181,10 +1195,11 @@
       textConfidence: textConfidence,
       wholeImageBox: wholeImageBox,
       expanded: expanded,
+      autoSeeded: autoSeeded, // #56 — seed was auto-picked (no manual box); drives the confirm-card note
       tileDoubled: false
     }
     paintTileOverlay(prop.mask)
-    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence, wholeImageBox, expanded)
+    showTileConfirm(t.combCount, prop.instances, prop.subharmonicWarning, prop.rows, prop.cols, textMode, textConfidence, wholeImageBox, expanded, autoSeeded)
     restoreDetectHint() // clear the "detecting…" notice — the card now carries the status
   }
 
@@ -1230,13 +1245,16 @@
     return n + ' · ' + rows + ' rows × ' + cols + ' column' + (cols === 1 ? '' : 's')
   }
 
-  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence, wholeImageBox, expanded) {
+  function showTileConfirm (combCount, instances, sub, rows, cols, textMode, textConfidence, wholeImageBox, expanded, autoSeeded) {
     tileCount.textContent = tileCountText(instances, rows, cols)
     // #60 phrase-expansion note: tell the user WHY the overlay covers more than they boxed (the seed
     // was expanded to the full repeating unit). Only fires on the text/NCC expansion path; hidden
     // otherwise. `if (tileExpanded)` guard: the element is static in the shell, but a defensive null
     // guard costs nothing and avoids a silent throw if the confirm card is ever injected dynamically.
     if (tileExpanded) tileExpanded.style.display = expanded ? 'block' : 'none'
+    // #56 auto-anchor note: tell the user the seed was self-selected (no box drawn). Same defensive
+    // null guard as tileExpanded.
+    if (tileAutoSeed) tileAutoSeed.style.display = autoSeeded ? 'block' : 'none'
     if (textMode) {
       // Text/NCC fallback path (#53): no combCount — the band is driven by the lattice-match
       // confidence (already gated >= 0.5). The "Detected by text-shape matching" label tells the user
@@ -1319,8 +1337,12 @@
       canvas.height
     )
     // region:null → the #31 guard denominator is the whole image (thin tiled strokes stay well under
-    // the ratio). dilate:1 reconstructs anti-aliased edges (T30) — bump to 2 if QA shows a 1px halo.
-    var r = Engine.fillMaskRegion(work, tileResult.propMask, { dilate: 1, maxFillRatio: 0.8 }, null)
+    // the ratio). dilate:1 only reconstructs a 1px anti-aliased edge halo (T30) and leaves THICK glyph
+    // interiors (this fixture's bold serif strokes) completely unfilled — CORE-28 QA (#56) found
+    // 'TAYLOR GALE' still fully legible after Accept with dilate:1 (68% of glyph-edge px changed but the
+    // stroke interior itself never got touched). dilate:2 closes that gap — verified on
+    // repeated-tile-template.jpg the glyphs no longer render legibly post-fill.
+    var r = Engine.fillMaskRegion(work, tileResult.propMask, { dilate: 2, maxFillRatio: 0.8 }, null)
     if (r && r.skipped) {
       showHintWarning('⚠ Tile-fill skipped — too much of the image matches. Re-box a tighter instance.')
       return // leave the canvas + base untouched; nothing committed

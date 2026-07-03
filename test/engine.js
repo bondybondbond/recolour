@@ -1227,6 +1227,144 @@ describe('recolour engine', function () {
     })
   })
 
+  // autoAnchorSeed (#56) — lattice-validated AUTOMATIC seed for tile-fill (the two-tap flow: no box).
+  // Ported verbatim from scripts/spike-auto-anchor-56.js (GO, 2026-07-02). The funnel:
+  // detectWatermark(whole) -> mergeIntoWords -> size-cluster peer eligibility -> top-K
+  // detectTextTiling -> axis-aligned survivor -> winner|null. These tests lock the four spike gates:
+  // M1 (accept reproduces the hand-boxed baseline), M2 (determinism / order-invariance), M3 (negatives
+  // abstain), plus the retrieval guard (the true word is surfaced AND wins). Coverage is gated on
+  // GRID-CELL Jaccard, NOT pixel IoU — intra-cell thickness is the deferred #62 issue (TEST-8), not a
+  // lattice error.
+  describe('autoAnchorSeed (#56)', function () {
+    this.timeout(30000) // whole-image detectWatermark + up to 6 detectTextTiling + downstream x2
+    const PROFILE = { edgeThreshold: 150, preContrast: false } // GUI DETECT_PROFILE (app.js)
+    const BASELINE_SEED = { x: 330, y: 32, width: 150, height: 46 } // #58 hand-boxed TAYLOR baseline
+
+    async function loadFixture (file) {
+      const _Jimp = require('jimp'); const Jimp = _Jimp.default || _Jimp // CORE-1: ESM/CJS interop
+      const jimg = await Jimp.read('./test/files/' + file)
+      return { data: jimg.bitmap.data, width: jimg.bitmap.width, height: jimg.bitmap.height }
+    }
+    // runTile()'s downstream, verbatim (mirrors app.js runTile + the spike's downstream()).
+    function downstream (img, region) {
+      const W = img.width, H = img.height
+      let seed = engine.detectWatermark(img, PROFILE, region).mask
+      const t = engine.detectTiling(img, { region: region })
+      let basis = t.tileBasis, textMode = false
+      if (t.combCount < t.combMin) {
+        const tt = engine.detectTextTiling(img, region)
+        if (tt.tiling) { basis = tt.tileBasis; textMode = true }
+      }
+      if (textMode && basis && basis.length >= 1) {
+        const v0 = basis[0], v1 = basis[1] || null
+        const cellW = Math.abs(v0.x) + (v1 ? Math.abs(v1.x) : 0) || region.width
+        const cellH = Math.abs(v0.y) + (v1 ? Math.abs(v1.y) : 0) || region.height
+        const node = engine.latticeCellOrigin(region.x, region.y, basis)
+        const x0 = Math.max(0, Math.min(W, node.x)), y0 = Math.max(0, Math.min(H, node.y))
+        const win = { x: x0, y: y0, width: Math.max(0, Math.min(W, node.x + cellW) - x0), height: Math.max(0, Math.min(H, node.y + cellH) - y0) }
+        seed = engine.foldMaskToCell(engine.detectWatermark(img, PROFILE, win).mask, W, H, basis)
+      }
+      const prop = engine.propagateMask(seed, W, H, basis, { frameCanonical: true })
+      return { basis: basis, prop: prop }
+    }
+    // Occupied lattice-CELL set under a basis, anchor (0,0) — content-thickness-INVARIANT (TEST-8).
+    // Same floor-based modulo as foldMaskToCell (CORE-26/27).
+    function cellSet (mask, w, basis, minPx) {
+      minPx = minPx || 15
+      const v0 = basis[0], v1 = basis[1] || null
+      const det = v1 ? (v0.x * v1.y - v0.y * v1.x) : 0
+      const counts = {}
+      for (let p = 0; p < mask.length; p++) {
+        if (!mask[p]) continue
+        const px = p % w, py = (p / w) | 0
+        let i, j
+        if (v1 && Math.abs(det) > 1e-9) { i = Math.floor((px * v1.y - py * v1.x) / det); j = Math.floor((-px * v0.y + py * v0.x) / det) } else { i = Math.floor((px * v0.x + py * v0.y) / (v0.x * v0.x + v0.y * v0.y)); j = 0 }
+        const key = i + ',' + j; counts[key] = (counts[key] || 0) + 1
+      }
+      const set = {}
+      for (const k in counts) if (counts[k] >= minPx) set[k] = 1
+      return set
+    }
+    function jaccard (a, b) {
+      let inter = 0, uni = 0
+      for (const k in a) { uni++; if (b[k]) inter++ }
+      for (const k in b) if (!a[k]) uni++
+      return uni ? inter / uni : 1
+    }
+    function sortBasis (basis) { return basis.map(v => v.x + ',' + v.y).sort().join(' | ') }
+
+    // M1 — the accept fixture: auto seed reproduces the hand-boxed baseline (basis rank + 18/3x6 grid +
+    // same lattice cells occupied). GRID-PHASE cell Jaccard, not pixel IoU (TEST-8).
+    it('M1 accept: auto seed reproduces the hand-boxed baseline on repeated-tile-template.jpg', async function () {
+      const img = await loadFixture('repeated-tile-template.jpg')
+      const r = engine.autoAnchorSeed(img, PROFILE)
+      assert.ok(r && r.region, `auto-anchor must NOT abstain on the acceptance fixture (got ${JSON.stringify(r)})`)
+      const auto = downstream(img, r.region)
+      const base = downstream(img, BASELINE_SEED)
+      assert.strictEqual(auto.prop.instances, base.prop.instances, `instances must match baseline: auto=${auto.prop.instances} base=${base.prop.instances}`)
+      assert.strictEqual(auto.prop.instances, 18, `expected 18 instances, got ${auto.prop.instances}`)
+      assert.strictEqual(auto.prop.rows, 3, `expected 3 rows, got ${auto.prop.rows}`)
+      assert.strictEqual(auto.prop.cols, 6, `expected 6 cols, got ${auto.prop.cols}`)
+      const jac = jaccard(cellSet(auto.prop.mask, img.width, auto.basis), cellSet(base.prop.mask, img.width, base.basis))
+      assert.ok(jac >= 0.9, `grid-phase cell Jaccard must be >= 0.9 (same lattice cells occupied), got ${jac.toFixed(3)}`)
+    })
+
+    // Retrieval guard (CORE-30, the funnel's highest-risk stage): the merge stage must SURFACE the true
+    // word and it must WIN. The auto-picked winner may sit at ANY grid node (not necessarily the
+    // hand-boxed one), so overlap is the wrong proxy — instead prove the auto seed locks the SAME
+    // LATTICE as the INDEPENDENT hand-boxed truth. A retrieval miss (true word never merged) could not
+    // reproduce the hand-boxed basis; a spurious win would lock a different / non-axis-aligned basis.
+    it('retrieval: the auto-picked winner locks the same lattice as the hand-boxed TAYLOR truth', async function () {
+      const img = await loadFixture('repeated-tile-template.jpg')
+      const r = engine.autoAnchorSeed(img, PROFILE)
+      assert.ok(r && r.region, 'must not abstain')
+      const truthBasis = engine.detectTextTiling(img, BASELINE_SEED).tileBasis
+      assert.strictEqual(sortBasis(r.basis), sortBasis(truthBasis),
+        `auto basis must equal the hand-boxed truth: auto=${JSON.stringify(r.basis)} truth=${JSON.stringify(truthBasis)}`)
+      // ...and it is an axis-aligned text grid (the survivor gate held), not diagonal texture.
+      const ang = (v) => { const a = Math.atan2(Math.abs(v.y), Math.abs(v.x)) * 180 / Math.PI; return Math.min(a, 90 - a) }
+      assert.ok(r.basis.every(v => ang(v) <= 10), `winner basis must be axis-aligned, got ${JSON.stringify(r.basis)}`)
+    })
+
+    // M2 — determinism: the winner is invariant to detectWatermark's component ORDER (the spike's
+    // shuffle test). Monkeypatch the whole-image call to reverse components; the winner must not move.
+    it('M2 determinism: winner is invariant to component order', async function () {
+      const img = await loadFixture('repeated-tile-template.jpg')
+      const natural = engine.autoAnchorSeed(img, PROFILE)
+      assert.ok(natural && natural.region, 'must not abstain')
+      const real = engine.detectWatermark
+      const det = real(img, PROFILE)
+      const reversed = { mask: det.mask, components: det.components.slice().reverse(), confidence: det.confidence }
+      engine.detectWatermark = function (im, opt, region) { return region ? real(im, opt, region) : reversed }
+      let shuffled
+      try { shuffled = engine.autoAnchorSeed(img, PROFILE) } finally { engine.detectWatermark = real }
+      assert.ok(shuffled && shuffled.region, 'reversed-order run must also find a winner')
+      assert.deepStrictEqual(shuffled.region, natural.region, 'winner region must be order-invariant')
+      assert.deepStrictEqual(shuffled.basis, natural.basis, 'winner basis must be order-invariant')
+    })
+
+    // M3 — negatives: clean photo / logo / repeated non-text texture must ALL abstain (return null).
+    // (The 4k/8k eagle negative from the spike is omitted here — a ~33MP decode per npm-test run is
+    // slow + needs the jpeg-js memory-cap override, WORKFLOW-15; kids1.jpg already carries the
+    // clean-photo abstain property, and the eagle is covered by the spike evidence.)
+    const NEGATIVES = ['kids1.jpg', 'logo.png', 'copyright-watermark.png']
+    NEGATIVES.forEach(function (file) {
+      it(`M3 negative: ${file} abstains (returns null)`, async function () {
+        const img = await loadFixture(file)
+        const r = engine.autoAnchorSeed(img, PROFILE)
+        assert.strictEqual(r, null, `${file} must abstain, got ${JSON.stringify(r)}`)
+      })
+    })
+
+    // wantReason contract: abstain surfaces a reason code for QA/telemetry instead of a bare null.
+    it('wantReason: abstain returns a { region:null, reason } object for QA', async function () {
+      const img = await loadFixture('logo.png')
+      const r = engine.autoAnchorSeed(img, { edgeThreshold: 150, preContrast: false, wantReason: true })
+      assert.ok(r && r.region === null, 'wantReason abstain must be an object with region:null')
+      assert.ok(['no_candidates', 'no_lattice', 'low_confidence'].indexOf(r.reason) >= 0, `reason must be a known code, got ${r.reason}`)
+    })
+  })
+
   // Anchor -> propagate (#47, T29 Phase 3 DoD). Two gaps remained after #52 shipped the FFT
   // propagate/confirm machinery: (1) the confirm card needs the lattice geometry (rows/cols), and
   // (2) a regression test proving anchor->propagate recovers tiled instances a per-blob pass misses.

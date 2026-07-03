@@ -662,6 +662,9 @@
       var bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1
       var bboxArea = bw * bh
       var aspect = bw / bh // watermark text spans wide bboxes; near-square blobs are texture (#45)
+      // Fill-ratio classification must use the RAW edge/close pixels only (fillHoles called without
+      // outMask here) — writing holes into `mask` is deferred until AFTER the isText gate below, so
+      // a solid-block rejection is unaffected by this change (same fillRatio as before).
       var filledArea = fillHoles(c.pixels, width, c.x0, c.y0, bw, bh)
       var fillRatio = filledArea / bboxArea
       var perimRatio = c.area > 0 ? c.perimeter / c.area : 0
@@ -672,6 +675,11 @@
         aspect >= minAspect
       if (!isText) continue
       for (var pi = 0; pi < c.pixels.length; pi++) mask[c.pixels[pi]] = 1
+      // CORE-28 (#56 retry): also union the component's ENCLOSED INTERIOR (thick glyph-stroke bowls/
+      // counters that the Sobel edge map never marks) into the output mask, so fillMaskRegion actually
+      // reconstructs the whole glyph, not just its outline. Re-run fillHoles with outMask=mask now
+      // that the component has passed classification — cheap (same bbox, already computed once above).
+      fillHoles(c.pixels, width, c.x0, c.y0, bw, bh, mask)
       passing.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, area: c.area, perimeter: c.perimeter })
     }
 
@@ -697,7 +705,16 @@
   // OUTSIDE inward from the bbox border (4-connected over empty cells), then filled = total minus
   // the cells the outside flood reached. A hollow ring (solid block's edge) fills to ~1.0; an open
   // letter shape barely fills at all.
-  function fillHoles (pixels, width, ox, oy, bw, bh) {
+  //
+  // CORE-28 QA (#56 retry): `outMask` is an OPTIONAL full-image Uint8Array — when supplied, every
+  // enclosed-hole cell (interior of a thick glyph stroke, e.g. a bold "A"/"O"/"G" bowl) that this
+  // flood does NOT reach from the border gets written into it (in ADDITION to the component's own
+  // edge pixels, already unioned by the caller). Without this, `detectWatermark`'s output `mask` is
+  // only the Sobel-edge/closed STROKE OUTLINE — for a bold/thick letterform the interior is never
+  // set, so `fillMaskRegion`/`propagateMask` never touch those pixels no matter how large `dilate`
+  // is (dilate only reaches a fixed halo from an edge pixel, not an arbitrarily-thick interior).
+  // This was the actual root cause of the tile-fill leaving full legible glyphs after Accept.
+  function fillHoles (pixels, width, ox, oy, bw, bh, outMask) {
     var size = bw * bh
     var occ = new Uint8Array(size)
     var i
@@ -731,6 +748,17 @@
       if (cxl < bw - 1) { var e1 = cidx + 1; if (!occ[e1] && !outside[e1]) { outside[e1] = 1; stack[top++] = e1 } }
       if (cyl > 0) { var n1 = cidx - bw; if (!occ[n1] && !outside[n1]) { outside[n1] = 1; stack[top++] = n1 } }
       if (cyl < bh - 1) { var s1 = cidx + bw; if (!occ[s1] && !outside[s1]) { outside[s1] = 1; stack[top++] = s1 } }
+    }
+    // CORE-28 (#56 retry): write enclosed-hole cells (!occ && !outside — i.e. never reached by the
+    // outward-in flood, so they are interior, not background) into the caller's full-image mask.
+    // occ cells are already unioned by the caller from `pixels`; only the holes are new here.
+    if (outMask) {
+      for (var li = 0; li < size; li++) {
+        if (!occ[li] && !outside[li]) {
+          var lxp = li % bw, lyp = (li / bw) | 0
+          outMask[(oy + lyp) * width + (ox + lxp)] = 1
+        }
+      }
     }
     return size - reached
   }
@@ -1717,6 +1745,163 @@
     return { mask: out, instances: instances, subharmonicWarning: subharmonicWarning, rows: rows, cols: cols }
   }
 
+  // =============================================================================================
+  // autoAnchorSeed (#56, T29 follow-up) — lattice-validated AUTOMATIC seed for tile-fill.
+  //
+  // WHY THIS EXISTS: tile-fill today requires the user to hand-box ONE watermark instance before
+  // propagation. This self-selects a confident instance instead — the "two-tap" flow (Auto-detect ->
+  // Tile-fill, no box). Validated by scripts/spike-auto-anchor-56.js (GO verdict, 2026-07-02): on
+  // repeated-tile-template.jpg the auto seed reproduces the hand-boxed baseline (basis (0,113)(415,0),
+  // 18 instances / 3x6, grid-phase Jaccard 1.000); four negatives (clean photos / logo / repeated
+  // texture) all abstain STRUCTURALLY (margin 1.000). Ported verbatim from the spike (CORE-21).
+  //
+  // THE FUNNEL (each stage's rationale is a hard-won research finding, do NOT drop a gate):
+  //   detectWatermark(whole-image)  -- returns per-LETTER blobs, NOT words (CORE-30)
+  //   -> mergeIntoWords             -- merge per-row adjacent letters into word/phrase bboxes.
+  //                                    MANDATORY: single-letter seeds are rejected by detectTextTiling's
+  //                                    fragment gate, so raw components cannot seed (CORE-30). This is
+  //                                    the funnel's highest-risk stage — a retrieval miss here cannot be
+  //                                    recovered downstream.
+  //   -> sizeClusterPrior + eligibility(peers>=MIN_PEERS)  -- a real tiled seed has MANY same-size peers;
+  //                                    a one-off logo/face blob has ~0. Cheap repetition proxy, no NCC.
+  //   -> rankByPrior -> top-K -> detectTextTiling per candidate (the ONLY expensive stage, bounded)
+  //   -> survivor = tiling && axis-aligned basis (AXIS_TOL). BOTH gates are required: explainedFrac/
+  //      confidence ALONE gives ZERO separation between real text grids and spurious diagonal texture
+  //      (CORE-31) — the peer gate kills logo, the axis gate kills copyright-texture.
+  //   -> winner = max confidence, tie peaks desc, tie raster idx (deterministic).
+  //
+  // CONTRACT: winner -> { region:{x,y,width,height}, basis, confidence, reason:'ok' }; abstain -> null.
+  // The GUI only needs winner-or-null. For QA/telemetry that wants the abstain REASON, pass
+  // options.wantReason=true and the abstain returns { region:null, basis:null, confidence:0, reason }
+  // instead of null (reason codes: no_candidates | no_lattice | low_confidence).
+  //
+  // Pure w.r.t. imageData (reads only); Node-testable (TEST-2) — takes a synthetic ImageData + options.
+  // =============================================================================================
+  var AUTO_ANCHOR = {
+    SIZE_TOL: 0.30,   // size-cluster peer tolerance (relative bbox w/h match)
+    GAP_FRAC: 1.2,    // horizontal run-merge: gap <= GAP_FRAC * letter-height stays one word
+    MIN_PEERS: 2,     // eligibility: a seed must visibly repeat in raw detection
+    TOP_K: 6,         // cap on expensive detectTextTiling calls
+    AXIS_TOL: 10,     // survivor gate: basis vectors within this many deg of an axis (real text grids)
+    MIN_MERGE: 12,    // drop degenerate tiny merges (below detectTextTiling's MIN_TEMPLATE — can't seed)
+    TAU: 0            // low-confidence floor (defence-in-depth). 0 today: all negatives abstain
+                      // STRUCTURALLY, so the structural gates carry the negatives — do NOT tune weights.
+  }
+  function aaBw (c) { return c.x1 - c.x0 + 1 }
+  function aaBh (c) { return c.y1 - c.y0 + 1 }
+  // Cheap size-cluster prior (NO NCC): a repeating watermark instance is one of MANY near-identical
+  // blobs; a face/texture blob is size-unique. Annotate each candidate with its same-size peer count.
+  function sizeClusterPrior (cands) {
+    for (var i = 0; i < cands.length; i++) {
+      var wi = aaBw(cands[i]), hi = aaBh(cands[i]), peers = 0
+      for (var j = 0; j < cands.length; j++) {
+        if (j === i) continue
+        var wj = aaBw(cands[j]), hj = aaBh(cands[j])
+        if (Math.abs(wj - wi) <= AUTO_ANCHOR.SIZE_TOL * wi && Math.abs(hj - hi) <= AUTO_ANCHOR.SIZE_TOL * hi) peers++
+      }
+      cands[i]._peers = peers
+      cands[i]._area = wi * hi
+    }
+  }
+  // Deterministic rank clone (pure — does not mutate input order, so a shuffled feed yields the same
+  // winner): peers desc, then area desc, then raster index.
+  function rankByPrior (cands) {
+    return cands.slice().sort(function (a, b) {
+      if (b._peers !== a._peers) return b._peers - a._peers
+      if (b._area !== a._area) return b._area - a._area
+      return a._idx - b._idx
+    })
+  }
+  // mergeIntoWords — merge per-LETTER blobs into WORD/PHRASE bboxes. Two components share a row if their
+  // vertical spans overlap >= 50% of the smaller height; within a row they merge into a run while the
+  // horizontal gap <= GAP_FRAC * letter-height.
+  //
+  // [TRAP] KNOWN GAP (do NOT "fix" silently): this assumes HORIZONTAL text baselines (row membership is
+  // vertical-span overlap). A rotated/diagonal watermark ("CONFIDENTIAL" at 45deg) produces per-letter
+  // blobs that will NOT merge into words — it falls through to a no_candidates abstain. That is CORRECT
+  // behaviour today (a silent miss, not a false positive — the AXIS_TOL gate guards the LATTICE, not the
+  // MERGE), but the spike only exercised axis-aligned text. If a rotated mark is hit in QA, emit
+  // `[TRAP]: rotated watermark — merge stage horizontal-only` so it lands in LEARNINGS.md.
+  function mergeIntoWords (cands) {
+    var cs = cands.slice().sort(function (a, b) { return (a.y0 - b.y0) || (a.x0 - b.x0) })
+    var used = new Uint8Array(cs.length)
+    var words = []
+    for (var i = 0; i < cs.length; i++) {
+      if (used[i]) continue
+      var row = [cs[i]]; used[i] = 1
+      var yi0 = cs[i].y0, yi1 = cs[i].y1
+      for (var j = i + 1; j < cs.length; j++) {
+        if (used[j]) continue
+        var ov = Math.min(yi1, cs[j].y1) - Math.max(yi0, cs[j].y0)
+        var minH = Math.min(yi1 - yi0, cs[j].y1 - cs[j].y0) + 1
+        if (ov >= 0.5 * minH) { row.push(cs[j]); used[j] = 1 }
+      }
+      row.sort(function (a, b) { return a.x0 - b.x0 })
+      var run = [row[0]]
+      for (var k = 1; k < row.length; k++) {
+        var gap = row[k].x0 - run[run.length - 1].x1
+        var refH = run[run.length - 1].y1 - run[run.length - 1].y0 + 1
+        if (gap <= AUTO_ANCHOR.GAP_FRAC * refH) { run.push(row[k]) } else { words.push(aaMergeBox(run)); run = [row[k]] }
+      }
+      words.push(aaMergeBox(run))
+    }
+    return words
+  }
+  function aaMergeBox (run) {
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (var i = 0; i < run.length; i++) { x0 = Math.min(x0, run[i].x0); y0 = Math.min(y0, run[i].y0); x1 = Math.max(x1, run[i].x1); y1 = Math.max(y1, run[i].y1) }
+    return { x0: x0, y0: y0, x1: x1, y1: y1 }
+  }
+  // Worst per-vector angle (deg) to its nearest axis. A real text lattice has one ~vertical + one
+  // ~horizontal vector (worst small); spurious diagonal-texture bases score high.
+  function axisMisalignmentDeg (basis) {
+    if (!basis || !basis.length) return 90
+    function ang (v) { var a = Math.atan2(Math.abs(v.y), Math.abs(v.x)) * 180 / Math.PI; return Math.min(a, 90 - a) }
+    var worst = 0
+    for (var i = 0; i < basis.length; i++) worst = Math.max(worst, ang(basis[i]))
+    return worst
+  }
+
+  // The public entry point. `options` carries the detection profile ({edgeThreshold, preContrast}) so
+  // the engine stays UI-agnostic. Returns a winner object or null (abstain); callers that need the
+  // abstain reason pass options.wantReason=true (see CONTRACT above).
+  function autoAnchorSeed (imageData, options) {
+    var opt = options || {}
+    var wantReason = !!opt.wantReason
+    function abstain (reason) { return wantReason ? { region: null, basis: null, confidence: 0, reason: reason } : null }
+    var det = detectWatermark(imageData, opt)
+    // Early-out: no raw components => nothing to merge. Do NOT proceed to the merge/prior stages.
+    if (!det.components || !det.components.length) return abstain('no_candidates')
+    var letters = det.components.map(function (c) { return { x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 } })
+    // Seed proposal: merge per-letter blobs into words, index in raster order, drop degenerate merges.
+    var words = mergeIntoWords(letters).map(function (c, i) { c._idx = i; return c })
+    var filtered = words.filter(function (c) { return aaBw(c) >= AUTO_ANCHOR.MIN_MERGE && aaBh(c) >= AUTO_ANCHOR.MIN_MERGE })
+    // Explicit merge failure mode: 0 word-level candidates => abstain immediately, before the prior.
+    if (!filtered.length) return abstain('no_candidates')
+    sizeClusterPrior(filtered)
+    // Eligibility: a seed must visibly repeat in raw detection (kills logo/one-off marks, no NCC cost).
+    var eligible = filtered.filter(function (c) { return c._peers >= AUTO_ANCHOR.MIN_PEERS })
+    if (!eligible.length) return abstain('no_lattice')
+    var topK = rankByPrior(eligible).slice(0, AUTO_ANCHOR.TOP_K)
+    // Score each candidate by the NCC lattice quality on its bbox (the only expensive stage).
+    var scored = topK.map(function (c) {
+      var region = { x: c.x0, y: c.y0, width: aaBw(c), height: aaBh(c) }
+      var tt = detectTextTiling(imageData, region)
+      return { region: region, tiling: tt.tiling, confidence: tt.confidence, peaks: tt.instances, basis: tt.tileBasis, idx: c._idx }
+    })
+    // Survivor = locks a lattice AND that lattice is a plausible axis-aligned text grid (both gates).
+    var survivors = scored.filter(function (s) { return s.tiling && axisMisalignmentDeg(s.basis) <= AUTO_ANCHOR.AXIS_TOL })
+    if (!survivors.length) return abstain('no_lattice')
+    survivors.sort(function (a, b) {
+      if (b.confidence !== a.confidence) return b.confidence - a.confidence
+      if (b.peaks !== a.peaks) return b.peaks - a.peaks
+      return a.idx - b.idx
+    })
+    var winner = survivors[0]
+    if (winner.confidence < AUTO_ANCHOR.TAU) return abstain('low_confidence')
+    return { region: winner.region, basis: winner.basis, confidence: winner.confidence, reason: 'ok' }
+  }
+
   return {
     rgbToLab: rgbToLab,
     deltaE76: deltaE76,
@@ -1728,6 +1913,7 @@
     detectTextTiling: detectTextTiling,
     foldMaskToCell: foldMaskToCell,
     latticeCellOrigin: latticeCellOrigin,
-    propagateMask: propagateMask
+    propagateMask: propagateMask,
+    autoAnchorSeed: autoAnchorSeed
   }
 })
